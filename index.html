@@ -154,6 +154,8 @@ async function joinExistingRoom() {
 async function joinRoomInternal(code) {
   roomId = code;
   lobby.style.display = 'none';
+  // stop practice loop once we leave the lobby
+  if (P) P.running = false;
   document.getElementById('ui').style.display = 'flex';
   roomCodeEl.textContent = roomId;
   seedEl.textContent = seed;
@@ -274,15 +276,131 @@ const PUSH_RADIUS = 60; // px
 const PUSH_IMP_VX = 700; // horizontal impulse
 const PUSH_IMP_VY = -420; // pop up a little
 
+function isTyping(){
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  return el.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+}
 addEventListener('keydown', (e)=>{
-  if (["ArrowUp","ArrowLeft","ArrowRight","Space","KeyA","KeyD","KeyW","KeyR","KeyN","ShiftLeft","ShiftRight"].includes(e.code)) e.preventDefault();
+  const typing = isTyping();
+  if (!typing && ["ArrowUp","ArrowLeft","ArrowRight","Space","KeyA","KeyD","KeyW","KeyR","KeyN","ShiftLeft","ShiftRight"].includes(e.code)) e.preventDefault();
+  if (typing) return; // don't capture keys while typing in inputs
   keys.add(e.code);
   if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') player.lastJumpPress = timeNow;
-  if (e.code === 'KeyR') restartLocal();
-  if (e.code === 'KeyN') hostNewLevel();
-  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') tryPush();
+  if (e.code === 'KeyR') { if (roomId) restartLocal(); else practiceRestart(); }
+  if (e.code === 'KeyN') { if (roomId) hostNewLevel(); else practiceNewLevel(); }
+  if ((e.code === 'ShiftLeft' || e.code === 'ShiftRight') && roomId) tryPush();
 });
-addEventListener('keyup', (e)=> keys.delete(e.code));
+addEventListener('keyup', (e)=>{ if (isTyping()) return; keys.delete(e.code); });
+
+/* ------------------------ Practice map while in lobby ------------------------ */
+let inLobby = true;
+const P = {
+  running: true,
+  seed: Math.floor(Math.random()*1e9),
+  player: { x:0,y:0,w:20,h:52, vx:0,vy:0, onGround:false, lastGroundTime:-999, lastJumpPress:-999, facing:1, runCycle:0, landedAt:0 },
+  platforms: [], walls: [], lava: [], startX:0, startY:0,
+  goalX:0, goalY:0, goalW:60, goalH:12,
+  last: performance.now(), t: 0
+};
+function generatePracticeLevel(seed){
+  const R = makeRNG(seed);
+  const segs = [], newWalls = [], newLava = [];
+  const groundY = Math.round(innerHeight*0.62);
+  const startPlat = {x: 0, y: groundY, w: 260, h: 18};
+  segs.push(startPlat);
+  const minY = 80;
+  const maxY = Math.min(innerHeight - 140, groundY + 80);
+  const floorY = Math.min(maxY+100, innerHeight-20);
+  let cursorX = startPlat.x + startPlat.w;
+  let cursorY = startPlat.y;
+  const targetLen = 1400; // shorter course for lobby
+  while (cursorX < targetLen){
+    const dY = (R() < 0.55 ? (R()*140) : -(R()*90));
+    let newY = Math.max(minY, Math.min(maxY, cursorY + dY));
+    if (newY > floorY - 160) newY = floorY - 160;
+    const maxDx = maxHorizDistanceForDeltaY(newY - cursorY) * 0.85;
+    const minDx = Math.max(90, maxDx*0.35);
+    let dx = Math.max(80, isFinite(maxDx) ? (minDx + R()*(maxDx - minDx)) : 120);
+    const plat = {x: Math.round(cursorX + dx), y: Math.round(newY), w: 150 + Math.floor(R()*110), h: 18};
+    segs.push(plat);
+    if (R()<0.6){
+      const gapStart = cursorX + 10, gapEnd = plat.x - 10, gapW = Math.max(0, gapEnd-gapStart);
+      if (gapW > 80){
+        const pitW = Math.min(gapW - 40, 160 + R()*180);
+        const pitX = gapStart + 20 + R()*(gapW - pitW - 40);
+        newLava.push({x: Math.round(pitX), y: floorY-12, w: Math.round(pitW), h: 12});
+      }
+    }
+    if (R()<0.25){
+      const wallH = 40 + Math.floor(R()*60);
+      const wx = Math.round(plat.x + 60 + R()*Math.max(20, plat.w-120));
+      newWalls.push({x: wx, y: plat.y - wallH, w: 16, h: wallH});
+    }
+    cursorX = plat.x + plat.w;
+    cursorY = plat.y;
+  }
+  // small goal for fun
+  const goalPlat = {x: cursorX + 120, y: Math.max(minY+40, cursorY - 40), w: 200, h: 18};
+  segs.push(goalPlat);
+  newLava.push({x: goalPlat.x - 120, y: floorY-12, w: goalPlat.w + 240, h: 12});
+  P.goalX = goalPlat.x + goalPlat.w - P.goalW - 16;
+  P.goalY = goalPlat.y - P.goalH;
+  segs.push({x: -1000, y: floorY, w: cursorX+2000, h: 200});
+  P.platforms = segs; P.walls = newWalls; P.lava = newLava;
+  P.startX = startPlat.x + 20; P.startY = startPlat.y - P.player.h;
+}
+function practiceRestart(){
+  const pl = P.player; pl.x=P.startX; pl.y=P.startY; pl.vx=0; pl.vy=0; pl.onGround=false; P.t=0;
+}
+function practicePhysics(dt){
+  const pl = P.player;
+  const left = keys.has('ArrowLeft') || keys.has('KeyA');
+  const right = keys.has('ArrowRight') || keys.has('KeyD');
+  const jumpPressed = (keys.has('Space') || keys.has('KeyW') || keys.has('ArrowUp'));
+  const desired = (right?1:0) - (left?1:0);
+  const accel = pl.onGround ? WORLD.runAccel : WORLD.runAccel*WORLD.airControl;
+  pl.vx += desired * accel * dt;
+  if (!left && !right){ const fric = pl.onGround ? WORLD.groundFric : WORLD.airFric; if (Math.abs(pl.vx) <= fric*dt) pl.vx=0; else pl.vx -= Math.sign(pl.vx)*fric*dt; }
+  pl.vx = Math.max(-WORLD.maxSpeed, Math.min(WORLD.maxSpeed, pl.vx));
+  if (right) pl.facing = 1; else if (left) pl.facing = -1;
+  pl.vy += WORLD.gravity * dt; if (pl.vy > WORLD.maxFall) pl.vy = WORLD.maxFall;
+  if (jumpPressed) pl.lastJumpPress = P.t;
+  const canJump = (P.t - pl.lastJumpPress) <= WORLD.jumpBuffer && (pl.onGround || (P.t - pl.lastGroundTime) <= WORLD.coyoteTime);
+  if (canJump) { pl.vy = -WORLD.jumpVel; pl.onGround = false; pl.lastJumpPress = -999; }
+  if (!jumpPressed && pl.vy < 0) pl.vy += WORLD.gravity * WORLD.shortHopCut * dt;
+  let newX = pl.x + pl.vx * dt; let newY = pl.y + pl.vy * dt; pl.onGround = false;
+  const solids = P.platforms.concat(P.walls);
+  const boundsX = {x: Math.min(pl.x, newX), y: pl.y, w: pl.w + Math.abs(pl.vx*dt), h: pl.h};
+  for (const s of solids){ if (!(boundsX.x < s.x+s.w && boundsX.x+boundsX.w > s.x && boundsX.y < s.y+s.h && boundsX.y+boundsX.h > s.y)) continue; if (newX < s.x+s.w && newX+pl.w > s.x && pl.y < s.y+s.h && pl.y+pl.h > s.y){ if (pl.vx > 0) newX = s.x - pl.w; else if (pl.vx < 0) newX = s.x + s.w; pl.vx = 0; } }
+  const boundsY = {x: newX, y: Math.min(pl.y, newY), w: pl.w, h: pl.h + Math.abs(pl.vy*dt)};
+  let grounded = false;
+  for (const s of solids){ if (!(boundsY.x < s.x+s.w && boundsY.x+boundsY.w > s.x && boundsY.y < s.y+s.h && boundsY.y+boundsY.h > s.y)) continue; if (newX < s.x+s.w && newX+pl.w > s.x && newY < s.y+s.h && newY+pl.h > s.y){ if (pl.vy > 0){ newY = s.y - pl.h; pl.vy = 0; grounded = true; } else if (pl.vy < 0){ newY = s.y + s.h; pl.vy = 0; } } }
+  pl.x = newX; pl.y = newY; if (grounded){ pl.onGround = true; pl.lastGroundTime = P.t; pl.landedAt = P.t; }
+  for (const l of P.lava){ if (pl.x < l.x+l.w && pl.x+pl.w > l.x && pl.y < l.y+l.h && pl.y+pl.h > l.y){ practiceRestart(); break; } }
+  const speed = Math.abs(pl.vx); if (pl.onGround && speed > 10) pl.runCycle = (pl.runCycle + dt * (0.6 + 0.004*speed)) % 1; else if (!pl.onGround) pl.runCycle = pl.runCycle; else pl.runCycle = (pl.runCycle*0.92);
+}
+function drawPractice(){
+  const cw = innerWidth, ch = innerHeight;
+  const camX = Math.floor(P.player.x - cw*0.35), camY = 0;
+  const grd = ctx.createLinearGradient(0,0,0,ch); grd.addColorStop(0,'#0f1222'); grd.addColorStop(1,'#12162a'); ctx.fillStyle=grd; ctx.fillRect(0,0,cw,ch);
+  ctx.globalAlpha = 0.25; ctx.fillStyle='#b6c4ff'; for (let i=0;i<80;i++){ const sx=(i*1231.7 % 3000) - (camX*0.2 % 3000); const sy=(i*811.3 % ch); ctx.fillRect((sx%(cw+300))-150, sy, 2, 2);} ctx.globalAlpha=1;
+  for (const p of P.platforms){ if (p.x + p.w < camX-50 || p.x > camX+cw+50) continue; const x=p.x-camX, y=p.y-camY; ctx.fillStyle='#222947'; ctx.fillRect(x,y,p.w,p.h); ctx.fillStyle='#2e3763'; ctx.fillRect(x,y,p.w,4); }
+  for (const w of P.walls){ if (w.x + w.w < camX-50 || w.x > camX+cw+50) continue; const x=w.x-camX, y=w.y-camY; ctx.fillStyle='#1a1f3a'; ctx.fillRect(x,y,w.w,w.h); ctx.fillStyle='#34406e'; ctx.fillRect(x,y,w.w,4); }
+  for (const l of P.lava){ if (l.x + l.w < camX-50 || l.x > camX+cw+50) continue; const x=l.x-camX, y=l.y-camY, t=P.t*5; const grad=ctx.createLinearGradient(0,y,0,y+l.h); grad.addColorStop(0,'#ffdb6e'); grad.addColorStop(0.4,'#ff7b3a'); grad.addColorStop(1,'#b1120d'); ctx.fillStyle=grad; ctx.fillRect(x,y,l.w,l.h); ctx.beginPath(); const A=3; ctx.moveTo(x,y); for (let i=0;i<=l.w;i+=8){ const wy = y + Math.sin((i*0.12)+t)*A; ctx.lineTo(x+i, wy);} ctx.lineTo(x+l.w,y+l.h); ctx.lineTo(x,y+l.h); ctx.closePath(); ctx.fillStyle='rgba(255,255,255,0.1)'; ctx.fill(); }
+  // goal flag just for target practice
+  ctx.fillStyle='#ffcf4b'; ctx.fillRect(P.goalX - camX, P.goalY - camY, P.goalW, P.goalH);
+  ctx.fillStyle = '#e8ecf1'; ctx.fillRect(P.goalX - camX + P.goalW/2-2, P.goalY - 50 - camY, 4, 50);
+  ctx.beginPath(); ctx.moveTo(P.goalX - camX + P.goalW/2+2, P.goalY - 50 - camY); ctx.lineTo(P.goalX - camX + P.goalW/2+32, P.goalY - 40 - camY); ctx.lineTo(P.goalX - camX + P.goalW/2+2, P.goalY - 30 - camY); ctx.closePath(); ctx.fill();
+  // practice player + name (live preview color/name)
+  const previewColor = (colorInput && colorInput.value) ? colorInput.value : '#e8ecf1';
+  drawStick(P.player.x - camX + P.player.w/2, P.player.y - camY, P.player, previewColor, P.t);
+  ctx.save(); ctx.font='12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial'; ctx.textAlign='center'; ctx.fillStyle=previewColor; const nm=(nameInput && nameInput.value ? nameInput.value : 'You').slice(0,14); ctx.fillText(nm, P.player.x - camX + P.player.w/2, P.player.y - camY - 56); ctx.restore();
+}
+function practiceLoop(now){ if (!P.running) return; const dtRaw=(now - P.last)/1000; P.last=now; const dt=Math.min(1/30, Math.max(0, dtRaw)); P.t += dt; practicePhysics(dt); drawPractice(); requestAnimationFrame(practiceLoop); }
+function startPractice(){ generatePracticeLevel(P.seed); practiceRestart(); requestAnimationFrame(practiceLoop); }
+function practiceNewLevel(){ P.seed = Math.floor(Math.random()*1e9); generatePracticeLevel(P.seed); practiceRestart(); }
 
 // Level data
 let platforms = [], walls = [], lavaPools = [];
@@ -407,19 +525,52 @@ function generateLevel(wSeed){
 
     cursorX = plat.x + plat.w;
     cursorY = plat.y;
+  }  // ---- Goal platform: varied X and Y, but always above a single jump from floor ----
+  const maxJump = Math.floor((WORLD.jumpVel*WORLD.jumpVel)/(2*WORLD.gravity)); // ~108
+  const antiCheeseY = Math.min(floorY - (maxJump + 24), maxY); // must be <= this (higher than ground jump)
+
+  // choose a horizontal offset to goal; we'll adapt if needed
+  let goalDX = 120 + Math.floor(R()*120); // 120..240
+  const gW = 200 + Math.floor(R()*160);   // 200..360 platform width
+
+  // helper: highest (smallest y) we can place and still clear dx from last platform top
+  function highestReachableYFrom(y0, dx){
+    let y = y0;                    // start same height
+    const step = 2;
+    while (y > minY + 20) {
+      const dY = y - y0;           // negative when higher
+      if (maxHorizDistanceForDeltaY(dY) >= dx) { y -= step; continue; }
+      break;
+    }
+    return Math.max(y, minY + 20);
   }
 
-  const goalPlat = {x: cursorX + 140, y: cursorY, w: 240, h: 18};
-  if (goalPlat.y > floorY - 160) goalPlat.y = floorY - 160; // use same floorY (no redeclare)
+  // Adapt goalDX downwards if we can't meet the anti-cheese height while reachable
+  let yReachTop = highestReachableYFrom(cursorY, goalDX);
+  let adapt = 0;
+  while (yReachTop > antiCheeseY && goalDX > 80 && adapt < 8) {
+    goalDX -= 20;
+    yReachTop = highestReachableYFrom(cursorY, goalDX);
+    adapt++;
+  }
+
+  // Final Y in [yReachTop, antiCheeseY]
+  let goalYTop = Math.max(minY + 20, yReachTop);
+  let goalYBottom = Math.min(antiCheeseY, cursorY + 40); // don't go way below last plat
+  if (goalYBottom < goalYTop) goalYBottom = goalYTop;
+
+  const goalPlat = { x: cursorX + goalDX, y: Math.round(goalYTop + R()*(goalYBottom - goalYTop)), w: gW, h: 18 };
   segs.push(goalPlat);
 
-  newLava.push({x: goalPlat.x - 160, y: floorY-12, w: goalPlat.w + 320, h: 12});
+  // Lava moat under goal (wider to match variable width)
+  newLava.push({ x: goalPlat.x - 160, y: floorY-12, w: goalPlat.w + 320, h: 12 });
 
   goalX = goalPlat.x + goalPlat.w - goalW - 20;
   goalY = goalPlat.y - goalH;
 
-  const floor = {x: -1000, y: floorY, w: cursorX+3000, h: 200};
+  const floor = { x: -1000, y: floorY, w: cursorX+3000, h: 200 };
   segs.push(floor);
+
 
   platforms = segs.sort((a,b)=> a.x - b.x);
   walls = newWalls.sort((a,b)=> a.x - b.x);
@@ -511,7 +662,15 @@ function physics(dt){
   }
 }
 
-function drawStick(px, py, pl, strokeColor='#e8ecf1'){
+// helper to keep ripple radius valid
+function rippleRadius(tSinceLand){
+  // Map t in [0, 0.12] -> [10, 80]; clamp and never negative
+  const k = Math.max(0, Math.min(1, tSinceLand / 0.12));
+  return 10 + 70 * k;
+}
+
+function drawStick(px, py, pl, strokeColor='#e8ecf1', currentTime=null){
+  const nowT = (currentTime == null) ? timeNow : currentTime;
   const t = pl.runCycle || 0, facing = pl.facing || 1;
   const hipY = py + 20;
   const swing = Math.sin(t*TAU), counter = Math.sin(t*TAU + Math.PI);
@@ -524,8 +683,15 @@ function drawStick(px, py, pl, strokeColor='#e8ecf1'){
   ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-26); ctx.stroke();
   drawLimb(0,-26+6,0,14,14,armA); drawLimb(0,-26+6,0,14,14,armB);
   ctx.beginPath(); ctx.arc(0,-26-10-4,10,0,TAU); ctx.stroke();
-  const tSinceLand = timeNow - (pl.landedAt||-999);
-  if (pl.onGround && tSinceLand < 0.12) { ctx.globalAlpha = 1 - (tSinceLand/0.12); ctx.beginPath(); ctx.arc(0, 2, 10 + 70*(tSinceLand/0.12), 0, TAU); ctx.stroke(); ctx.globalAlpha = 1; }
+  const tSinceLand = nowT - (pl.landedAt||-999);
+  if (pl.onGround && tSinceLand >= 0 && tSinceLand < 0.12) {
+    ctx.globalAlpha = 1 - (tSinceLand/0.12);
+    ctx.beginPath();
+    const rr = rippleRadius(tSinceLand); // always >= 10
+    ctx.arc(0, 2, rr, 0, TAU);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
   ctx.restore();
 }
 
@@ -574,29 +740,24 @@ function draw(){
 
   // local player + name
   drawStick(player.x - camX + player.w/2, player.y - camY, player, localColor);
- ctx.save();
-ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
-ctx.textAlign = 'center';
-ctx.fillStyle = localColor; // match player color
-// (Optional outline for readability)
-// ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.65)'; ctx.strokeText((localName||'You').slice(0,14), player.x - camX + player.w/2, player.y - camY - 56);
-ctx.fillText((localName||'You').slice(0,14), player.x - camX + player.w/2, player.y - camY - 56);
-ctx.restore();
+  ctx.save();
+  ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = localColor; // match player color
+  ctx.fillText((localName||'You').slice(0,14), player.x - camX + player.w/2, player.y - camY - 56);
+  ctx.restore();
 
   // Remote ghosts + names
   for (const [pid, p] of Object.entries(players)) {
     if (pid === localId) continue;
     const ghost = { x:p.x||0, y:p.y||0, w:20, h:52, vx:p.vx||0, vy:p.vy||0, onGround: Math.abs((p.vy||0))<1, runCycle:0, facing:(p.vx||0)>0?1:-1, landedAt: -999 };
     drawStick(ghost.x - camX + 10, ghost.y - camY, ghost, p.color||'#b6c4ff');
-   ctx.save();
-ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
-ctx.textAlign = 'center';
-ctx.fillStyle = p.color || '#b6c4ff'; // match that player's color
-// (Optional outline for readability)
-// ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.65)'; ctx.strokeText((p.name||'Player').slice(0,14), ghost.x - camX, ghost.y - camY - 56);
-ctx.fillText((p.name||'Player').slice(0,14), ghost.x - camX, ghost.y - camY - 56);
-ctx.restore();
-
+    ctx.save();
+    ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = p.color || '#b6c4ff'; // match that player's color
+    ctx.fillText((p.name||'Player').slice(0,14), ghost.x - camX, ghost.y - camY - 56);
+    ctx.restore();
   }
 
   const displayTime = finished ? (timeNow - timeStart) : Math.max(0, timeNow - timeStart);
@@ -631,6 +792,8 @@ addEventListener('beforeunload', ()=>{
   if (roomId) { try { db.ref(`rooms/${roomId}/players/${localId}`).remove(); } catch(e){} }
 });
 
+startPractice();
+
 /* -------------------------------- Self-tests (dev) --------------------------------
 Run by appending ?test=1 to the URL. These are sanity checks to catch syntax/logic
 issues like stray braces or redeclarations without altering gameplay. */
@@ -656,6 +819,15 @@ issues like stray braces or redeclarations without altering gameplay. */
 
     // Test 3: hostNewLevel exists and is a function
     console.assert(typeof hostNewLevel === 'function', 'hostNewLevel should be defined');
+
+    // Test 4: ripple radius is never negative
+    (function(){
+      const r1 = rippleRadius(-5);
+      const r2 = rippleRadius(0);
+      const r3 = rippleRadius(0.12);
+      const r4 = rippleRadius(1);
+      console.assert(r1 >= 10 && r2 >= 10 && r3 >= 10 && r4 >= 10, 'ripple radius should never be negative');
+    })();
 
     console.log('[TEST] passed');
   } catch (e) {
