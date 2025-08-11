@@ -7,16 +7,34 @@
 <style>
   html, body { height: 100%; margin: 0; background: #0f1222; color: #e8ecf1; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
   canvas { display:block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+
   #ui { position: fixed; inset: 0 0 auto 0; display: flex; gap: 12px; align-items: center; padding: 10px 14px;
         background: linear-gradient(180deg, rgba(15,18,34,.9), rgba(15,18,34,.25), rgba(15,18,34,0)); pointer-events: none; }
   .pill { pointer-events: auto; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); padding: 8px 12px; border-radius: 999px; font-weight: 600; backdrop-filter: blur(6px); }
   .spacer { flex: 1; }
   button { cursor: pointer; pointer-events: auto; background: #1b203d; color: #e8ecf1; border: 1px solid rgba(255,255,255,.12); padding: 8px 12px; border-radius: 10px; font-weight: 700; }
   #help { position: fixed; right: 10px; bottom: 10px; font-size: 12px; opacity: .85; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); padding: 6px 10px; border-radius: 8px; }
+
   #lobby { position: fixed; inset: 0; background: rgba(0,0,0,0.92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
   #lobby .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px; width: min(460px, 92vw); }
   input, button, select { margin: 4px 0; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.15); background: #161a31; color: #e8ecf1; width: 100%; box-sizing: border-box; }
-  #leaderboard span.badge, #seriesboard span.badge { background: rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); padding: 2px 8px; border-radius: 999px; margin-right: 6px; display:inline-block; }
+
+  /* Vertical badges */
+  #leaderboard .badge, #seriesboard .badge {
+    display:block;
+    margin: 2px 0;
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.12);
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+
+  /* 24-color palette */
+  .color-grid { display:grid; grid-template-columns: repeat(8, 28px); gap:8px; }
+  .color-btn { width:28px; height:28px; border-radius:6px; border:2px solid rgba(255,255,255,.2);
+               background:transparent; cursor:pointer; box-shadow:0 0 0 2px transparent; }
+  .color-btn[aria-pressed="true"] { box-shadow:0 0 0 2px #fff; border-color:#fff; }
+  .color-btn[disabled] { cursor:not-allowed; opacity:.35; filter:grayscale(20%); border-color:rgba(255,255,255,.1); }
 </style>
 <!-- Firebase compat (v8.x API) -->
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
@@ -27,9 +45,11 @@
   <div id="lobby">
     <div class="card">
       <h2 style="margin:0 0 8px 0;">Stick Parkour — Multiplayer</h2>
-      <div style="display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center;">
+      <div style="display:grid; grid-template-columns: 1fr; gap:10px;">
         <input id="nameInput" placeholder="Your name" />
-        <input type="color" id="colorInput" value="#ff3b3b" style="width:56px; padding:0; height:42px; border-radius:10px;" />
+        <!-- hidden keeps the rest of the code path unchanged -->
+        <input type="hidden" id="colorInput" value="#ff3b3b" />
+        <div id="palette" class="color-grid" aria-label="Choose a color"></div>
       </div>
       <button id="createRoom">Create Room</button>
       <div style="display:flex; gap:8px; margin-top:6px;">
@@ -105,11 +125,64 @@ restartBtn.onclick = () => restartLocal();
 document.getElementById('createRoom').onclick = createRoom;
 document.getElementById('joinRoom').onclick = joinExistingRoom;
 
+/* --------------------------- 24-color palette (no dupes) --------------------------- */
+const COLOR_PALETTE = [
+  '#FF0000','#FF7F00','#FFFF00','#7FFF00','#00FF00','#00FF7F',
+  '#00FFFF','#007FFF','#0000FF','#7F00FF','#FF00FF','#FF007F',
+  '#B22222','#FF4500','#FFD700','#ADFF2F','#32CD32','#20B2AA',
+  '#00CED1','#1E90FF','#8A2BE2','#C71585','#DA70D6','#A0522D'
+];
+let selectedColor = '#ff3b3b';
+const paletteEl = document.getElementById('palette');
+
+function firstAvailableColor(takenSet) {
+  const used = new Set([...takenSet].map(c=>c.toLowerCase()));
+  for (const c of COLOR_PALETTE) if (!used.has(c.toLowerCase())) return c;
+  return COLOR_PALETTE[0];
+}
+
+function renderColorPicker(takenColors = new Set()) {
+  paletteEl.innerHTML = '';
+  const current = (document.getElementById('colorInput').value || selectedColor).toLowerCase();
+
+  COLOR_PALETTE.forEach(c => {
+    const btn = document.createElement('button');
+    btn.className = 'color-btn';
+    btn.style.background = c;
+    const isTaken = takenColors.has(c.toLowerCase());
+    const isMine = (c.toLowerCase() === current);
+    btn.disabled = isTaken && !isMine;
+    btn.setAttribute('aria-label', c);
+    btn.setAttribute('aria-pressed', String(isMine));
+    btn.onclick = async () => {
+      if (btn.disabled) return;
+      // re-check current taken colors to avoid race
+      if (roomId) {
+        const snap = await db.ref(`rooms/${roomId}/players`).get();
+        const takenNow = new Set(Object.values(snap.val() || {}).map(p => (p.color || '').toLowerCase()));
+        if (takenNow.has(c.toLowerCase()) && !isMine) {
+          alert('That color is already taken!');
+          renderColorPicker(takenNow);
+          return;
+        }
+        await db.ref(`rooms/${roomId}/players/${localId}`).update({ color: c });
+      }
+      selectedColor = c;
+      document.getElementById('colorInput').value = c;
+      renderColorPicker(takenColors);
+    };
+    paletteEl.appendChild(btn);
+  });
+}
+// initial render (no room yet)
+renderColorPicker();
+
 /* Create room (host) */
 async function createRoom() {
   try {
     localName = (nameInput.value || "Player").slice(0, 18);
-    localColor = colorInput.value || "#ff3b3b";
+    // honor palette/hidden input
+    localColor = (document.getElementById('colorInput').value || selectedColor || "#ff3b3b");
     const code = Math.random().toString(36).substr(2,6).toUpperCase();
 
     seed = Math.floor(Math.random()*1e9);
@@ -137,7 +210,7 @@ async function createRoom() {
 async function joinExistingRoom() {
   try {
     localName = (nameInput.value || "Player").slice(0, 18);
-    localColor = colorInput.value || "#ff3b3b";
+    localColor = (document.getElementById('colorInput').value || selectedColor || "#ff3b3b");
     const code = (document.getElementById('joinCode').value || "").toUpperCase();
     if (!code) { alert("Enter a room code"); return; }
 
@@ -166,6 +239,15 @@ async function joinRoomInternal(code) {
   roomCodeEl.textContent = roomId;
   seedEl.textContent = seed;
 
+  // If chosen color is taken, auto-pick the first free one
+  const playersSnap = await db.ref(`rooms/${roomId}/players`).get();
+  const takenSet = new Set(Object.values(playersSnap.val() || {}).map(p => (p.color || '').toLowerCase()));
+  if (takenSet.has((localColor || '').toLowerCase())) {
+    localColor = firstAvailableColor(takenSet);
+    selectedColor = localColor;
+    document.getElementById('colorInput').value = localColor;
+  }
+
   // Add self to players; ensure removal on disconnect
   const playerRef = db.ref(`rooms/${roomId}/players/${localId}`);
   await playerRef.set({
@@ -177,6 +259,9 @@ async function joinRoomInternal(code) {
   // players
   db.ref(`rooms/${roomId}/players`).on('value', snap => {
     players = snap.val() || {};
+    // keep palette synced with taken colors
+    const takenNow = new Set(Object.values(players).map(p => (p.color || '').toLowerCase()));
+    renderColorPicker(takenNow);
   });
 
   // per-level leaderboard
@@ -254,39 +339,35 @@ async function hostNewLevel() {
   }
 }
 
-/* Update the leaderboard UI */
+/* Update the leaderboard UI (vertical) */
 function renderLeaderboard() {
   const rows = Object.entries(leaderboard).map(([pid, row]) => ({ pid, name: row.name || 'Player', time: +row.time || 0 }));
   rows.sort((a,b)=> a.time - b.time);
-  lbEl.innerHTML = rows.map(r => `<span class="badge">${escapeHTML(r.name)} — ${r.time.toFixed(3)}s</span>`).join(' ');
+  lbEl.innerHTML = rows.map(r => `<div class="badge">${escapeHTML(r.name)} — ${r.time.toFixed(3)}s</div>`).join('');
 }
 function renderSeriesboard(){
   const rows = Object.entries(seriesScores).map(([pid, row]) => ({ pid, name: row.name || 'Player', points: +row.points || 0 }));
   rows.sort((a,b)=> a.points - b.points || (a.name||'').localeCompare(b.name||''));
-  seriesEl.innerHTML = rows.map(r => `<span class="badge">${escapeHTML(r.name)} — ${r.points} pts</span>`).join(' ');
+  seriesEl.innerHTML = rows.map(r => `<div class="badge">${escapeHTML(r.name)} — ${r.points} pts</div>`).join('');
 }
 function escapeHTML(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'}[c])); }
 
 /* ------------------------------ World/Viewport scaling ------------------------------ */
-// All players must simulate the SAME world units regardless of their window size.
-// We draw in a canonical world where HEIGHT = WORLD_H. The canvas transform scales
-// to the actual device pixels so positions from any client match.
-const WORLD_H = 900; // logical world height in units (same for everyone)
-let VIEW_SCALE = 1;  // pixels per world unit (varies per device)
-let VIEW_W = 0;      // viewport width in world units
-let VIEW_H = 0;      // viewport height in world units
+const WORLD_H = 900;
+let VIEW_SCALE = 1;
+let VIEW_W = 0;
+let VIEW_H = 0;
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 
 function fit() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
-  VIEW_SCALE = innerHeight / WORLD_H; // uniform scale for x & y
+  VIEW_SCALE = innerHeight / WORLD_H;
   VIEW_W = innerWidth / VIEW_SCALE;
   VIEW_H = innerHeight / VIEW_SCALE;
   canvas.width = Math.floor(innerWidth * dpr);
   canvas.height = Math.floor(innerHeight * dpr);
-  // draw everything in WORLD units; browser scales to pixels
   ctx.setTransform(dpr*VIEW_SCALE, 0, 0, dpr*VIEW_SCALE, 0, 0);
 }
 addEventListener('resize', fit, {passive:true});
@@ -521,7 +602,7 @@ function generateLevel(wSeed){
   const startPlat = {x: 0, y: groundY, w: 240, h: 18};
   segs.push(startPlat);
 
-  const targetLen = 4200; // fixed logical width so all clients match
+  const targetLen = 4200;
   const minY = 80;
   const maxY = Math.min(WORLD_H - 140, groundY + 100);
   const floorY = Math.min(maxY+100, WORLD_H-20);
@@ -797,9 +878,7 @@ addEventListener('beforeunload', ()=>{ if (roomId) { try { db.ref(`rooms/${roomI
 
 startPractice();
 
-/* -------------------------------- Self-tests (dev) --------------------------------
-Run by appending ?test=1 to the URL. These are sanity checks to catch syntax/logic
-issues like stray braces or redeclarations without altering gameplay. */
+/* -------------------------------- Self-tests (dev) -------------------------------- */
 (function selfTests(){
   try {
     const params = new URLSearchParams(location.search);
@@ -809,9 +888,7 @@ issues like stray braces or redeclarations without altering gameplay. */
     (function(){ let threw = false; try { generateLevel(42); } catch(e){ threw = true; } console.assert(!threw, 'generateLevel should not throw'); })();
     console.assert(typeof hostNewLevel === 'function', 'hostNewLevel should be defined');
     (function(){ const r1 = rippleRadius(-5), r2 = rippleRadius(0), r3 = rippleRadius(0.12), r4 = rippleRadius(1); console.assert(r1 >= 10 && r2 >= 10 && r3 >= 10 && r4 >= 10, 'ripple radius should never be negative'); })();
-    // New test: world scaling deterministic regardless of window
     (function(){ const h = WORLD_H; console.assert(h === 900, 'WORLD_H should be constant for all clients'); })();
-    // Scoring tests
     (function(){
       const players = { a:{name:'A'}, b:{name:'B'}, c:{name:'C'} };
       const lb = { a:{name:'A', time: 5}, c:{name:'C', time: 9} };
