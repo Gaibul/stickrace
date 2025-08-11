@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stick Figure Parkour — Multiplayer</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #0f1222; color: #e8ecf1; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+  canvas { display:block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+  #ui { position: fixed; inset: 0 0 auto 0; display: flex; gap: 12px; align-items: center; padding: 10px 14px;
+        background: linear-gradient(180deg, rgba(15,18,34,.9), rgba(15,18,34,.25), rgba(15,18,34,0)); pointer-events: none; }
+  .pill { pointer-events: auto; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); padding: 8px 12px; border-radius: 999px; font-weight: 600; backdrop-filter: blur(6px); }
+  .spacer { flex: 1; }
+  button { cursor: pointer; pointer-events: auto; background: #1b203d; color: #e8ecf1; border: 1px solid rgba(255,255,255,.12); padding: 8px 12px; border-radius: 10px; font-weight: 700; }
+  #help { position: fixed; right: 10px; bottom: 10px; font-size: 12px; opacity: .85; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); padding: 6px 10px; border-radius: 8px; }
+  #lobby { position: fixed; inset: 0; background: rgba(0,0,0,0.92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  #lobby .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px; width: min(420px, 90vw); }
+  input, button, select { margin: 4px 0; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.15); background: #161a31; color: #e8ecf1; width: 100%; box-sizing: border-box; }
+  #leaderboard span.badge { background: rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); padding: 2px 8px; border-radius: 999px; margin-right: 6px; display:inline-block; }
+  .nameTag { position: absolute; transform: translate(-50%, -120%); font-size: 12px; padding: 2px 6px; border-radius: 6px; background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.12); pointer-events:none; white-space:nowrap; }
+</style>
+<!-- Firebase compat v10 (namespaced) -->
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+</head>
+<body>
+  <!-- Lobby -->
+  <div id="lobby">
+    <div class="card">
+      <h2 style="margin:0 0 8px 0;">Stick Parkour — Multiplayer</h2>
+      <div style="display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center;">
+        <input id="nameInput" placeholder="Your name" />
+        <input type="color" id="colorInput" value="#ff3b3b" style="width:56px; padding:0; height:42px; border-radius:10px;" />
+      </div>
+      <button id="createRoom">Create Room</button>
+      <div style="display:flex; gap:8px; margin-top:6px;">
+        <input id="joinCode" placeholder="Room code (e.g., ABC123)" />
+        <button id="joinRoom" style="width:auto;">Join</button>
+      </div>
+      <div style="opacity:.8; font-size:12px; margin-top:6px;">Tip: Share the 6-letter code so friends can join.</div>
+    </div>
+  </div>
+
+  <!-- In-game UI -->
+  <div id="ui" style="display:none">
+    <div class="pill">🧩 Room: <span id="roomCode">—</span></div>
+    <div class="pill">🎲 Seed: <span id="seed">—</span></div>
+    <div class="pill">⏱️ Your Time: <span id="time">0.000</span>s</div>
+    <div class="pill" id="hostOnly" style="display:none;">
+      <button id="newLevelBtn">New Level</button>
+      <button id="restartBtn">Restart</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="pill">🏁 Leaderboard: <span id="leaderboard"></span></div>
+  </div>
+
+  <div id="help">Move: A/D or ⬅️/➡️ · Jump: W/⬆️/Space · Hold for higher jump · R Restart (you) · N = Host: New Level · Touching lava resets you</div>
+  <canvas id="game"></canvas>
+
+<script>
+/* ------------------------ Firebase setup ------------------------ */
+// 1) Paste your Firebase config here:
+const firebaseConfig = {
+  /* YOUR FIREBASE CONFIG */
+};
+// 2) Init:
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/* ------------------------ Multiplayer state ------------------------ */
+const localId = Math.random().toString(36).slice(2, 11);
+let localName = "";
+let localColor = "#ff3b3b";
+let roomId = null;
+let hostId = null;
+let seed = 0;
+let players = {};      // realtime snapshot of room players
+let leaderboard = {};  // id -> {name, time}
+let isHost = false;
+
+// UI refs
+const lobby = document.getElementById('lobby');
+const nameInput = document.getElementById('nameInput');
+const colorInput = document.getElementById('colorInput');
+const roomCodeEl = document.getElementById('roomCode');
+const seedEl = document.getElementById('seed');
+const timeEl = document.getElementById('time');
+const lbEl = document.getElementById('leaderboard');
+const hostOnly = document.getElementById('hostOnly');
+document.getElementById('createRoom').onclick = createRoom;
+document.getElementById('joinRoom').onclick = joinExistingRoom;
+document.getElementById('newLevelBtn').onclick = hostNewLevel;
+document.getElementById('restartBtn').onclick = () => restartLocal();
+
+/* Create room (host) */
+async function createRoom() {
+  localName = (nameInput.value || "Player").slice(0, 18);
+  localColor = colorInput.value || "#ff3b3b";
+  const code = Math.random().toString(36).substr(2,6).toUpperCase();
+
+  seed = Math.floor(Math.random()*1e9);
+  roomId = code;
+  hostId = localId;
+  isHost = true;
+
+  await db.ref(`rooms/${roomId}`).set({
+    seed, hostId, started: true, leaderboard: {}
+  });
+
+  await joinRoomInternal(roomId);
+}
+
+/* Join an existing room */
+async function joinExistingRoom() {
+  localName = (nameInput.value || "Player").slice(0, 18);
+  localColor = colorInput.value || "#ff3b3b";
+  const code = (document.getElementById('joinCode').value || "").toUpperCase();
+  if (!code) { alert("Enter a room code"); return; }
+
+  const snap = await db.ref(`rooms/${code}`).get();
+  if (!snap.exists()) { alert("Room not found"); return; }
+
+  roomId = code;
+  const val = snap.val();
+  seed = val.seed;
+  hostId = val.hostId || null;
+  isHost = (hostId === localId); // typically false for joiners
+  await joinRoomInternal(roomId);
+}
+
+/* Attach listeners, register presence */
+async function joinRoomInternal(code) {
+  roomId = code;
+  lobby.style.display = 'none';
+  document.getElementById('ui').style.display = 'flex';
+  roomCodeEl.textContent = roomId;
+  seedEl.textContent = seed;
+
+  // Add self to players; ensure removal on disconnect
+  const playerRef = db.ref(`rooms/${roomId}/players/${localId}`);
+  await playerRef.set({
+    name: localName, color: localColor,
+    x: 0, y: 0, vx: 0, vy: 0, finished: false, time: 0
+  });
+  playerRef.onDisconnect().remove();
+
+  // Listen players
+  db.ref(`rooms/${roomId}/players`).on('value', snap => {
+    players = snap.val() || {};
+  });
+
+  // Listen leaderboard
+  db.ref(`rooms/${roomId}/leaderboard`).on('value', snap => {
+    leaderboard = snap.val() || {};
+    renderLeaderboard();
+  });
+
+  // Listen for seed changes (host pressing New Level)
+  db.ref(`rooms/${roomId}/seed`).on('value', snap => {
+    const newSeed = snap.val();
+    if (typeof newSeed === 'number' && newSeed !== seed) {
+      seed = newSeed;
+      seedEl.textContent = seed;
+      // reset everyone's local finished flag UI-wise
+      finished = false;
+      generateLevel(seed);
+      restartLocal();
+    }
+  });
+
+  // Listen for hostId (in case host leaves & you transfer host manually if needed)
+  db.ref(`rooms/${roomId}/hostId`).on('value', snap => {
+    hostId = snap.val();
+    isHost = (hostId === localId);
+    hostOnly.style.display = isHost ? 'inline-block' : 'none';
+  });
+
+  // Switch to game
+  startGame();
+  hostOnly.style.display = isHost ? 'inline-block' : 'none';
+}
+
+/* Host-only: set a new seed + clear leaderboard + reset players' finished flag */
+async function hostNewLevel() {
+  if (!isHost || !roomId) return;
+  const newSeed = Math.floor(Math.random()*1e9);
+  await db.ref(`rooms/${roomId}`).update({ seed: newSeed, leaderboard: {} });
+  // Reset everyone's finished server-side (best-effort)
+  const pSnap = await db.ref(`rooms/${roomId}/players`).get();
+  if (pSnap.exists()) {
+    const updates = {};
+    for (const pid of Object.keys(pSnap.val())) {
+      updates[pid] = { finished: false, time: 0 };
+    }
+    await db.ref(`rooms/${roomId}/players`).update(updates);
+  }
+}
+
+/* Update the leaderboard UI */
+function renderLeaderboard() {
+  // Convert to array and sort by time asc
+  const rows = Object.entries(leaderboard).map(([pid, row]) => ({ pid, name: row.name || 'Player', time: +row.time || 0 }));
+  rows.sort((a,b)=> a.time - b.time);
+  lbEl.innerHTML = rows.map(r => `<span class="badge">${escapeHTML(r.name)} — ${r.time.toFixed(3)}s</span>`).join(' ');
+}
+function escapeHTML(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
+
+/* ------------------------ Game (from your single-player, adapted) ------------------------ */
+
+const TAU = Math.PI * 2;
+function makeRNG(seed){ return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2**32; }
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function fit() {
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(innerWidth * dpr);
+  canvas.height = Math.floor(innerHeight * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', fit, {passive:true});
+fit();
+
+const WORLD = {
+  gravity: 2600,
+  maxFall: 3000,
+  groundFric: 1800,
+  airFric: 200,
+  runAccel: 3500,
+  maxSpeed: 500,
+  airControl: 0.6,
+  jumpVel: 750,
+  shortHopCut: 0.5,
+  coyoteTime: 0.10,
+  jumpBuffer: 0.10,
+  stepHeight: 8
+};
+
+// Local player physics body
+const player = { x:0,y:0,w:20,h:52, vx:0,vy:0, onGround:false, lastGroundTime:-999, lastJumpPress:-999, facing:1, runCycle:0, landedAt:0 };
+
+let keys = new Set();
+addEventListener('keydown', (e)=>{
+  if (["ArrowUp","ArrowLeft","ArrowRight","Space","KeyA","KeyD","KeyW","KeyR","KeyN"].includes(e.code)) e.preventDefault();
+  keys.add(e.code);
+  if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') player.lastJumpPress = timeNow;
+  if (e.code === 'KeyR') restartLocal();
+  if (e.code === 'KeyN' && isHost) hostNewLevel();
+});
+addEventListener('keyup', (e)=> keys.delete(e.code));
+
+// Level data
+let platforms = [], walls = [], lavaPools = [];
+let startX=0, startY=0, goalX=0, goalY=0, goalW=60, goalH=12;
+let timeNow = 0, timeStart = 0, finished = false, deathFlashUntil = -1;
+
+function rectsOverlap(ax,ay,aw,ah, bx,by,bw,bh){ return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by; }
+function killPlayer(){ deathFlashUntil = timeNow + 0.25; restartLocal(); }
+
+/* Reachability helper */
+function maxHorizDistanceForDeltaY(deltaY){
+  const J = WORLD.jumpVel, g = WORLD.gravity;
+  const A = 0.5*g, B = -J, C = -deltaY;
+  const disc = B*B - 4*A*C; if (disc < 0) return 0;
+  const t = (-B + Math.sqrt(disc)) / (2*A);
+  const vx = WORLD.maxSpeed * 0.95;
+  return vx * t;
+}
+
+/* Level generation (same logic, RNG seeded from room) */
+function generateLevel(wSeed){
+  const R = makeRNG(wSeed);
+  const segs = [], newWalls = [], newLava = [];
+
+  const groundY = Math.round(innerHeight*0.58);
+  const startPlat = {x: 0, y: groundY, w: 240, h: 18};
+  segs.push(startPlat);
+
+  const targetLen = Math.max(3200, innerWidth*3.2);
+  const minY = 80;
+  const maxY = Math.min(innerHeight - 140, groundY + 100);
+  const floorY = Math.min(maxY+100, innerHeight-20);
+
+  let cursorX = startPlat.x + startPlat.w;
+  let cursorY = startPlat.y;
+
+  while (cursorX < targetLen) {
+    const maxUp = 120, maxDown = 190;
+    let dY = (R() < 0.55 ? (R()*maxDown) : -(R()*maxUp));
+    let newY = Math.max(minY, Math.min(maxY, cursorY + dY));
+    if (newY > floorY - 160) newY = floorY - 160;
+    dY = newY - cursorY;
+
+    const maxDx = maxHorizDistanceForDeltaY(dY) * 0.85;
+    const minDx = Math.max(90, maxDx*0.35);
+    let dx = minDx + R()*(maxDx - minDx);
+    if (!isFinite(dx) || dx < 80) { dx = 120; newY = cursorY; dY = 0; }
+
+    const platW = 160 + Math.floor(R()*140);
+    const platH = 18;
+    const plat = {x: Math.round(cursorX + dx), y: Math.round(newY), w: platW, h: platH};
+
+    // Mid step for steep ups
+    if (dY < -60 && R() < 0.6) {
+      const midX = (cursorX + plat.x)/2;
+      const midY = Math.round(cursorY - Math.min(40, -dY*0.6));
+      const mid = {x: Math.round(midX-60), y: midY, w: 120, h: 14};
+      const ok1 = (mid.x - (cursorX)) <= maxHorizDistanceForDeltaY(mid.y - cursorY);
+      const ok2 = (plat.x - (mid.x+mid.w)) <= maxHorizDistanceForDeltaY(plat.y - mid.y);
+      if (ok1 && ok2) segs.push(mid);
+    }
+
+    // Ground lava in gaps
+    if (R() < 0.65) {
+      const gapStart = cursorX + 10;
+      const gapEnd = plat.x - 10;
+      const gapW = Math.max(0, gapEnd - gapStart);
+      if (gapW > 60) {
+        const pitW = Math.min(gapW - 40, 200 + R()*280);
+        const pitX = gapStart + 20 + R()*(gapW - pitW - 40);
+        newLava.push({x: Math.round(pitX), y: floorY-12, w: Math.round(pitW), h: 12});
+        if (gapW - pitW > 180 && R() < 0.35) {
+          const pit2W = Math.min(gapW - pitW - 100, 160 + R()*240);
+          const pit2X = pitX + pitW + 60;
+          if (pit2W > 80) newLava.push({x: Math.round(pit2X), y: floorY-12, w: Math.round(pit2W), h: 12});
+        }
+      }
+    }
+
+    segs.push(plat);
+
+    // Lava strips on platforms (≤15% width)
+    if (R() < 0.25 && plat.w > 100) {
+      const maxLavaW = Math.floor(plat.w * 0.15);
+      const minLavaW = Math.max(16, Math.floor(maxLavaW * 0.5));
+      if (maxLavaW > minLavaW) {
+        const margin = 20;
+        const lavaW = Math.floor(minLavaW + R() * (maxLavaW - minLavaW));
+        const range = Math.max(0, plat.w - lavaW - margin*2);
+        const lavaX = Math.floor(plat.x + margin + R()*range);
+        newLava.push({ x: lavaX, y: plat.y - 12, w: lavaW, h: 12 });
+      }
+    }
+
+    // Walls / ceilings
+    if (R() < 0.35) {
+      const wallH = 50 + Math.floor(R()*70);
+      const margin = 90;
+      const wx = Math.round(plat.x + margin + R()*(Math.max(20, plat.w - margin*2)));
+      newWalls.push({x: wx, y: plat.y - wallH, w: 16, h: wallH});
+    }
+    if (R() < 0.20) {
+      const ceilingW = 120 + Math.floor(R()*120);
+      const cx = Math.round(plat.x + 30 + R()*Math.max(30, plat.w-60));
+      const cy = Math.max(minY+20, plat.y - 110 - R()*40);
+      newWalls.push({x: cx, y: cy, w: ceilingW, h: 14});
+    }
+
+    cursorX = plat.x + plat.w;
+    cursorY = plat.y;
+  }
+
+  const goalPlat = {x: cursorX + 140, y: cursorY, w: 240, h: 18};
+  const floorY = Math.min(Math.min(innerHeight - 140, Math.round(innerHeight*0.58) + 100)+100, innerHeight-20);
+  if (goalPlat.y > floorY - 160) goalPlat.y = floorY - 160;
+  segs.push(goalPlat);
+
+  // Lava moat under goal
+  newLava.push({x: goalPlat.x - 160, y: floorY-12, w: goalPlat.w + 320, h: 12});
+
+  goalX = goalPlat.x + goalPlat.w - goalW - 20;
+  goalY = goalPlat.y - goalH;
+
+  // Bottom floor
+  const floor = {x: -1000, y: floorY, w: cursorX+3000, h: 200};
+  segs.push(floor);
+
+  platforms = segs.sort((a,b)=> a.x - b.x);
+  walls = newWalls.sort((a,b)=> a.x - b.x);
+  lavaPools = newLava.sort((a,b)=> a.x - b.x);
+
+  startX = startPlat.x + 20;
+  startY = startPlat.y - player.h;
+}
+
+function restartLocal(){
+  player.x=startX; player.y=startY; player.vx=0; player.vy=0; player.onGround=false;
+  finished=false; timeStart=timeNow;
+  // also update server finished=false/time=0
+  if (roomId) db.ref(`rooms/${roomId}/players/${localId}`).update({ finished:false, time:0 });
+}
+
+/* Physics step */
+function physics(dt){
+  const left = keys.has('ArrowLeft') || keys.has('KeyA');
+  const right = keys.has('ArrowRight') || keys.has('KeyD');
+  const jumpPressed = (keys.has('Space') || keys.has('KeyW') || keys.has('ArrowUp'));
+
+  const desired = (right?1:0) - (left?0:0) - (left?1:0);
+  const accel = player.onGround ? WORLD.runAccel : WORLD.runAccel*WORLD.airControl;
+  player.vx += ((right?1:0) - (left?1:0)) * accel * dt;
+
+  if (!left && !right) {
+    const fric = player.onGround ? WORLD.groundFric : WORLD.airFric;
+    if (Math.abs(player.vx) <= fric*dt) player.vx = 0; else player.vx -= Math.sign(player.vx)*fric*dt;
+  }
+
+  player.vx = Math.max(-WORLD.maxSpeed, Math.min(WORLD.maxSpeed, player.vx));
+  if (right) player.facing = 1; else if (left) player.facing = -1;
+
+  player.vy += WORLD.gravity * dt;
+  if (player.vy > WORLD.maxFall) player.vy = WORLD.maxFall;
+
+  if (jumpPressed) player.lastJumpPress = timeNow;
+  const canJump = (timeNow - player.lastJumpPress) <= WORLD.jumpBuffer && (player.onGround || (timeNow - player.lastGroundTime) <= WORLD.coyoteTime);
+  if (canJump) { player.vy = -WORLD.jumpVel; player.onGround = false; player.lastJumpPress = -999; }
+  if (!jumpPressed && player.vy < 0) player.vy += WORLD.gravity * WORLD.shortHopCut * dt;
+
+  let newX = player.x + player.vx * dt;
+  let newY = player.y + player.vy * dt;
+  player.onGround = false;
+
+  const solids = platforms.concat(walls);
+
+  const boundsX = {x: Math.min(player.x, newX), y: player.y, w: player.w + Math.abs(player.vx*dt), h: player.h};
+  for (const s of solids) {
+    if (!rectsOverlap(boundsX.x,boundsX.y,boundsX.w,boundsX.h, s.x,s.y,s.w,s.h)) continue;
+    if (rectsOverlap(newX, player.y, player.w, player.h, s.x,s.y,s.w,s.h)) {
+      if (player.vx > 0) newX = s.x - player.w; else if (player.vx < 0) newX = s.x + s.w;
+      player.vx = 0;
+    }
+  }
+
+  const boundsY = {x: newX, y: Math.min(player.y, newY), w: player.w, h: player.h + Math.abs(player.vy*dt)};
+  let groundedThisFrame = false;
+  for (const s of solids) {
+    if (!rectsOverlap(boundsY.x,boundsY.y,boundsY.w,boundsY.h, s.x,s.y,s.w,s.h)) continue;
+    if (rectsOverlap(newX, newY, player.w, player.h, s.x,s.y,s.w,s.h)) {
+      if (player.vy > 0) { newY = s.y - player.h; player.vy = 0; groundedThisFrame = true; }
+      else if (player.vy < 0) { newY = s.y + s.h; player.vy = 0; }
+    }
+  }
+
+  player.x = newX; player.y = newY;
+  if (groundedThisFrame) { player.onGround = true; player.lastGroundTime = timeNow; player.landedAt = timeNow; }
+
+  for (const l of lavaPools) { if (rectsOverlap(player.x,player.y,player.w,player.h, l.x,l.y,l.w,l.h)) { killPlayer(); break; } }
+
+  const speed = Math.abs(player.vx);
+  if (player.onGround && speed > 10) player.runCycle = (player.runCycle + dt * (0.6 + 0.004*speed)) % 1;
+  else if (!player.onGround) player.runCycle = player.runCycle;
+  else player.runCycle = (player.runCycle*0.92);
+
+  if (!finished && rectsOverlap(player.x,player.y,player.w,player.h, goalX,goalY,goalW,goalH)) {
+    finished = true;
+    const t = timeNow - timeStart;
+    timeEl.textContent = Math.max(0, t).toFixed(3);
+    // push to server if not already recorded or better
+    if (roomId) {
+      db.ref(`rooms/${roomId}/players/${localId}`).update({ finished:true, time: t });
+      // set leaderboard time if empty or better
+      const lbRef = db.ref(`rooms/${roomId}/leaderboard/${localId}`);
+      lbRef.transaction(current => {
+        if (!current || typeof current.time !== 'number' || t < current.time) {
+          return { name: localName, time: t };
+        }
+        return current;
+      });
+    }
+  }
+}
+
+/* Drawing */
+function drawStick(px, py, pl, strokeColor='#e8ecf1'){
+  const t = pl.runCycle || 0, facing = pl.facing || 1;
+  const headR = 10, torso = 26, hipY = py + 20;
+  const swing = Math.sin(t*TAU), counter = Math.sin(t*TAU + Math.PI);
+  const legA = swing * 0.9, legB = counter * 0.9, armA = counter * 1.2, armB = swing * 1.2;
+  const airTilt = Math.max(-0.25, Math.min(0.25, -(pl.vy||0)/1200));
+
+  ctx.save(); ctx.translate(px, hipY); ctx.scale(facing,1); ctx.rotate(airTilt);
+  ctx.lineCap='round'; ctx.lineWidth=3; ctx.strokeStyle=strokeColor;
+  drawLimb(0,0,0,18,18,legA); drawLimb(0,0,0,18,18,legB);
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-26); ctx.stroke();
+  drawLimb(0,-26+6,0,14,14,armA); drawLimb(0,-26+6,0,14,14,armB);
+  ctx.beginPath(); ctx.arc(0,-26-10-4,10,0,TAU); ctx.stroke();
+  const tSinceLand = timeNow - (pl.landedAt||-999);
+  if (pl.onGround && tSinceLand < 0.12) { ctx.globalAlpha = 1 - (tSinceLand/0.12); ctx.beginPath(); ctx.arc(0, 2, 10 + 70*(tSinceLand/0.12), 0, TAU); ctx.stroke(); ctx.globalAlpha = 1; }
+  ctx.restore();
+}
+
+function drawLimb(x0,y0,offX,len1,len2,angle){
+  const ax = x0 + offX + Math.cos(angle)*len1; const ay = y0 + Math.sin(angle)*len1;
+  const bx = ax + Math.cos(angle+0.2)*len2; const by = ay + Math.sin(angle+0.2)*len2;
+  ctx.beginPath(); ctx.moveTo(x0+offX, y0); ctx.lineTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+}
+
+function draw(){
+  const cw = innerWidth, ch = innerHeight;
+  const camX = Math.floor(player.x - cw*0.35);
+  const camY = 0;
+
+  // bg
+  const grd = ctx.createLinearGradient(0,0,0,ch);
+  grd.addColorStop(0, '#0f1222'); grd.addColorStop(1, '#12162a');
+  ctx.fillStyle = grd; ctx.fillRect(0,0,cw,ch);
+
+  // stars
+  ctx.globalAlpha = 0.25; ctx.fillStyle = '#b6c4ff';
+  for (let i=0;i<80;i++) {
+    const sx = (i*1231.7 % 3000) - (camX*0.2 % 3000);
+    const sy = (i*811.3 % ch);
+    ctx.fillRect((sx% (cw+300))-150, sy, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  // platforms
+  for (const p of platforms) {
+    if (p.x + p.w < camX-50 || p.x > camX+cw+50) continue;
+    const x = p.x - camX, y = p.y - camY;
+    ctx.fillStyle = '#222947'; ctx.fillRect(x, y, p.w, p.h);
+    ctx.fillStyle = '#2e3763'; ctx.fillRect(x, y, p.w, 4);
+  }
+
+  // walls/ceilings
+  for (const w of walls) {
+    if (w.x + w.w < camX-50 || w.x > camX+cw+50) continue;
+    const x = w.x - camX, y = w.y - camY;
+    ctx.fillStyle = '#1a1f3a'; ctx.fillRect(x, y, w.w, w.h);
+    ctx.fillStyle = '#34406e'; ctx.fillRect(x, y, w.w, 4);
+  }
+
+  // lava
+  for (const l of lavaPools) {
+    if (l.x + l.w < camX-50 || l.x > camX+cw+50) continue;
+    const x = l.x - camX, y = l.y - camY; const t = timeNow*5;
+    const grad = ctx.createLinearGradient(0,y,0,y+l.h);
+    grad.addColorStop(0,'#ffdb6e'); grad.addColorStop(0.4,'#ff7b3a'); grad.addColorStop(1,'#b1120d');
+    ctx.fillStyle = grad; ctx.fillRect(x, y, l.w, l.h);
+    ctx.beginPath(); const waveAmp = 3; ctx.moveTo(x, y);
+    for (let i=0;i<=l.w;i+=8){ const wy = y + Math.sin((i*0.12)+t)*waveAmp; ctx.lineTo(x+i, wy); }
+    ctx.lineTo(x+l.w, y+l.h); ctx.lineTo(x, y+l.h); ctx.closePath();
+    ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
+  }
+
+  // goal
+  ctx.fillStyle = finished ? '#3bd16f' : '#ffcf4b';
+  ctx.fillRect(goalX - camX, goalY - camY, goalW, goalH);
+  ctx.fillStyle = '#e8ecf1';
+  ctx.fillRect(goalX - camX + goalW/2-2, goalY - 50 - camY, 4, 50);
+  ctx.beginPath(); ctx.moveTo(goalX - camX + goalW/2+2, goalY - 50 - camY);
+  ctx.lineTo(goalX - camX + goalW/2+32, goalY - 40 - camY); ctx.lineTo(goalX - camX + goalW/2+2, goalY - 30 - camY);
+  ctx.closePath(); ctx.fill();
+
+  // local player
+  drawStick(player.x - camX + player.w/2, player.y - camY, player, localColor);
+
+  // remote players
+  drawRemotePlayers(camX, camY);
+
+  const displayTime = finished ? (timeNow - timeStart) : Math.max(0, timeNow - timeStart);
+  timeEl.textContent = displayTime.toFixed(3);
+
+  if (timeNow < deathFlashUntil) { ctx.fillStyle = 'rgba(255,80,60,0.35)'; ctx.fillRect(0,0,cw,ch); }
+}
+
+/* Remote players: lightweight client-side animation */
+const remoteAnim = new Map(); // id -> {runCycle, facing, onGround, landedAt, lastX, lastTime}
+function drawRemotePlayers(camX, camY){
+  for (const [pid, p] of Object.entries(players)) {
+    if (pid === localId) continue;
+    const x = (p.x||0), y = (p.y||0), vx = (p.vx||0), vy = (p.vy||0);
+    const color = p.color || '#b6c4ff';
+    const key = pid;
+    const rec = remoteAnim.get(key) || { runCycle: 0, facing: 1, onGround:false, landedAt: -999, lastX: x, lastT: timeNow };
+    const dt = Math.max(0, timeNow - rec.lastT);
+    const speed = Math.abs(vx);
+    if (speed > 10) rec.runCycle = (rec.runCycle + dt * (0.6 + 0.004*speed)) % 1;
+    rec.facing = vx>0 ? 1 : (vx<0 ? -1 : rec.facing);
+    rec.onGround = (Math.abs(vy) < 1); // crude
+    if (rec.onGround && Math.abs(x - rec.lastX) > 0.1) rec.landedAt = timeNow;
+
+    const ghost = { x, y, w:20, h:52, vx, vy, onGround: rec.onGround, runCycle: rec.runCycle, facing: rec.facing, landedAt: rec.landedAt };
+    drawStick(x - camX + 10, y - camY, ghost, color);
+
+    // name tag
+    ctx.save();
+    ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(x - camX - 44, y - camY - 70, 88, 18);
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.strokeRect(x - camX - 44, y - camY - 70, 88, 18);
+    ctx.fillStyle = '#e8ecf1';
+    ctx.fillText((p.name||'Player').slice(0,14), x - camX, y - camY - 56);
+    ctx.restore();
+
+    rec.lastX = x; rec.lastT = timeNow;
+    remoteAnim.set(key, rec);
+  }
+}
+
+/* Loop + sync throttling */
+let lastRAF = performance.now();
+let lastSync = 0;
+function loop(now){
+  const dtRaw = (now - lastRAF) / 1000; lastRAF = now;
+  const dt = Math.min(1/30, Math.max(0, dtRaw));
+  timeNow += dt;
+
+  physics(dt);
+  draw();
+
+  // Throttle network writes to ~10 Hz
+  if (roomId && (now - lastSync) > 1000/10) {
+    lastSync = now;
+    db.ref(`rooms/${roomId}/players/${localId}`).update({
+      name: localName, color: localColor,
+      x: player.x, y: player.y, vx: player.vx, vy: player.vy
+    });
+  }
+
+  requestAnimationFrame(loop);
+}
+
+/* Start game after joining */
+function startGame(){
+  seedEl.textContent = seed;
+  generateLevel(seed);
+  restartLocal();
+  requestAnimationFrame(loop);
+}
+
+// Clean up on unload (just in case; onDisconnect handles server-side)
+addEventListener('beforeunload', ()=>{
+  if (roomId) {
+    try { db.ref(`rooms/${roomId}/players/${localId}`).remove(); } catch(e){}
+  }
+});
+</script>
+</body>
+</html>
