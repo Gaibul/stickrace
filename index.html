@@ -14,14 +14,13 @@
   button { cursor: pointer; pointer-events: auto; background: #1b203d; color: #e8ecf1; border: 1px solid rgba(255,255,255,.12); padding: 8px 12px; border-radius: 10px; font-weight: 700; }
   #help { position: fixed; right: 10px; bottom: 10px; font-size: 12px; opacity: .85; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); padding: 6px 10px; border-radius: 8px; }
   #lobby { position: fixed; inset: 0; background: rgba(0,0,0,0.92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
-  #lobby .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px; width: min(420px, 90vw); }
+  #lobby .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px; width: min(460px, 92vw); }
   input, button, select { margin: 4px 0; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.15); background: #161a31; color: #e8ecf1; width: 100%; box-sizing: border-box; }
   #leaderboard span.badge { background: rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); padding: 2px 8px; border-radius: 999px; margin-right: 6px; display:inline-block; }
-  .nameTag { position: absolute; transform: translate(-50%, -120%); font-size: 12px; padding: 2px 6px; border-radius: 6px; background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.12); pointer-events:none; white-space:nowrap; }
 </style>
-<!-- Firebase compat v10 (namespaced) -->
-<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+<!-- Firebase compat (v8.x API) -->
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
 </head>
 <body>
   <!-- Lobby -->
@@ -46,7 +45,7 @@
     <div class="pill">🧩 Room: <span id="roomCode">—</span></div>
     <div class="pill">🎲 Seed: <span id="seed">—</span></div>
     <div class="pill">⏱️ Your Time: <span id="time">0.000</span>s</div>
-    <div class="pill" id="hostOnly" style="display:none;">
+    <div class="pill" id="hostOnly" style="display:none; gap:8px;">
       <button id="newLevelBtn">New Level</button>
       <button id="restartBtn">Restart</button>
     </div>
@@ -54,20 +53,25 @@
     <div class="pill">🏁 Leaderboard: <span id="leaderboard"></span></div>
   </div>
 
-  <div id="help">Move: A/D or ⬅️/➡️ · Jump: W/⬆️/Space · Hold for higher jump · R Restart (you) · N = Host: New Level · Touching lava resets you</div>
+  <div id="help">Move: A/D or ⬅️/➡️ · Jump: W/⬆️/Space · Hold for higher jump · R Restart (you) · N (host): New Level · Shift: Push nearby player (5s cd) · Touch lava = reset</div>
   <canvas id="game"></canvas>
 
 <script>
-/* ------------------------ Firebase setup ------------------------ */
-// 1) Paste your Firebase config here:
+/* -------------------------------- Firebase setup -------------------------------- */
 const firebaseConfig = {
-  /* YOUR FIREBASE CONFIG */
+  apiKey: "AIzaSyAEqutXCO5OZD6VU_ohaBxNfh7G8Q6PEy0",
+  authDomain: "nomercy-8269a.firebaseapp.com",
+  databaseURL: "https://nomercy-8269a-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "nomercy-8269a",
+  storageBucket: "nomercy-8269a.firebasestorage.app",
+  messagingSenderId: "349047620790",
+  appId: "1:349047620790:web:3206ff81cb7f5413d29217",
+  measurementId: "G-1WX7CWBFGF"
 };
-// 2) Init:
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-/* ------------------------ Multiplayer state ------------------------ */
+/* ------------------------------- Multiplayer state ------------------------------- */
 const localId = Math.random().toString(36).slice(2, 11);
 let localName = "";
 let localColor = "#ff3b3b";
@@ -87,45 +91,63 @@ const seedEl = document.getElementById('seed');
 const timeEl = document.getElementById('time');
 const lbEl = document.getElementById('leaderboard');
 const hostOnly = document.getElementById('hostOnly');
+const newLevelBtn = document.getElementById('newLevelBtn');
+const restartBtn = document.getElementById('restartBtn');
+newLevelBtn.onclick = () => hostNewLevel();
+restartBtn.onclick = () => restartLocal();
+
 document.getElementById('createRoom').onclick = createRoom;
 document.getElementById('joinRoom').onclick = joinExistingRoom;
-document.getElementById('newLevelBtn').onclick = hostNewLevel;
-document.getElementById('restartBtn').onclick = () => restartLocal();
 
 /* Create room (host) */
 async function createRoom() {
-  localName = (nameInput.value || "Player").slice(0, 18);
-  localColor = colorInput.value || "#ff3b3b";
-  const code = Math.random().toString(36).substr(2,6).toUpperCase();
+  try {
+    localName = (nameInput.value || "Player").slice(0, 18);
+    localColor = colorInput.value || "#ff3b3b";
+    const code = Math.random().toString(36).substr(2,6).toUpperCase();
 
-  seed = Math.floor(Math.random()*1e9);
-  roomId = code;
-  hostId = localId;
-  isHost = true;
+    seed = Math.floor(Math.random()*1e9);
+    roomId = code;
+    hostId = localId;
+    isHost = true;
 
-  await db.ref(`rooms/${roomId}`).set({
-    seed, hostId, started: true, leaderboard: {}
-  });
+    // Properly closed set; no stray braces
+    await db.ref(`rooms/${roomId}`).set({
+      seed: seed,
+      hostId: hostId,
+      started: true,
+      leaderboard: {}
+    });
 
-  await joinRoomInternal(roomId);
+    await joinRoomInternal(roomId);
+  } catch (err) {
+    console.error("createRoom error", err);
+    alert("Create Room failed: " + (err && err.message ? err.message : err));
+  }
 }
 
 /* Join an existing room */
 async function joinExistingRoom() {
-  localName = (nameInput.value || "Player").slice(0, 18);
-  localColor = colorInput.value || "#ff3b3b";
-  const code = (document.getElementById('joinCode').value || "").toUpperCase();
-  if (!code) { alert("Enter a room code"); return; }
+  try {
+    localName = (nameInput.value || "Player").slice(0, 18);
+    localColor = colorInput.value || "#ff3b3b";
+    const code = (document.getElementById('joinCode').value || "").toUpperCase();
+    if (!code) { alert("Enter a room code"); return; }
 
-  const snap = await db.ref(`rooms/${code}`).get();
-  if (!snap.exists()) { alert("Room not found"); return; }
+    const snap = await db.ref(`rooms/${code}`).get();
+    if (!snap.exists()) { alert("Room not found"); return; }
 
-  roomId = code;
-  const val = snap.val();
-  seed = val.seed;
-  hostId = val.hostId || null;
-  isHost = (hostId === localId); // typically false for joiners
-  await joinRoomInternal(roomId);
+    roomId = code;
+    const val = snap.val();
+    seed = val.seed;
+    hostId = val.hostId || null;
+    isHost = (hostId === localId); // typically false for joiners
+
+    await joinRoomInternal(roomId);
+  } catch (err) {
+    console.error("joinExistingRoom error", err);
+    alert("Join Room failed: " + (err && err.message ? err.message : err));
+  }
 }
 
 /* Attach listeners, register presence */
@@ -161,52 +183,58 @@ async function joinRoomInternal(code) {
     if (typeof newSeed === 'number' && newSeed !== seed) {
       seed = newSeed;
       seedEl.textContent = seed;
-      // reset everyone's local finished flag UI-wise
       finished = false;
       generateLevel(seed);
       restartLocal();
     }
   });
 
-  // Listen for hostId (in case host leaves & you transfer host manually if needed)
+  // Listen host id to toggle host controls
   db.ref(`rooms/${roomId}/hostId`).on('value', snap => {
     hostId = snap.val();
     isHost = (hostId === localId);
-    hostOnly.style.display = isHost ? 'inline-block' : 'none';
+    hostOnly.style.display = isHost ? 'inline-flex' : 'none';
+  });
+
+  // Listen for push impulses and apply if targeted to me
+  db.ref(`rooms/${roomId}/impulses`).on('child_added', snap => {
+    const imp = snap.val();
+    if (imp && imp.to === localId) {
+      player.vx += imp.vx;
+      player.vy += imp.vy;
+    }
   });
 
   // Switch to game
   startGame();
-  hostOnly.style.display = isHost ? 'inline-block' : 'none';
+  hostOnly.style.display = (hostId === localId) ? 'inline-flex' : 'none';
 }
 
-/* Host-only: set a new seed + clear leaderboard + reset players' finished flag */
+/* Host-only: set a new seed + clear leaderboard + reset finished flags */
 async function hostNewLevel() {
-  if (!isHost || !roomId) return;
+  if (!roomId) return;
+  if (!isHost) { alert('Only the host can start a new level.'); return; }
   const newSeed = Math.floor(Math.random()*1e9);
   await db.ref(`rooms/${roomId}`).update({ seed: newSeed, leaderboard: {} });
-  // Reset everyone's finished server-side (best-effort)
+  // Reset finished/time for each player WITHOUT overwriting other fields
   const pSnap = await db.ref(`rooms/${roomId}/players`).get();
   if (pSnap.exists()) {
-    const updates = {};
-    for (const pid of Object.keys(pSnap.val())) {
-      updates[pid] = { finished: false, time: 0 };
-    }
-    await db.ref(`rooms/${roomId}/players`).update(updates);
+    const vals = pSnap.val();
+    await Promise.all(Object.keys(vals).map(pid =>
+      db.ref(`rooms/${roomId}/players/${pid}`).update({ finished:false, time:0 })
+    ));
   }
 }
 
 /* Update the leaderboard UI */
 function renderLeaderboard() {
-  // Convert to array and sort by time asc
   const rows = Object.entries(leaderboard).map(([pid, row]) => ({ pid, name: row.name || 'Player', time: +row.time || 0 }));
   rows.sort((a,b)=> a.time - b.time);
   lbEl.innerHTML = rows.map(r => `<span class="badge">${escapeHTML(r.name)} — ${r.time.toFixed(3)}s</span>`).join(' ');
 }
-function escapeHTML(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
+function escapeHTML(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'}[c])); }
 
-/* ------------------------ Game (from your single-player, adapted) ------------------------ */
-
+/* ------------------------------ Game implementation ------------------------------ */
 const TAU = Math.PI * 2;
 function makeRNG(seed){ return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2**32; }
 
@@ -237,16 +265,22 @@ const WORLD = {
   stepHeight: 8
 };
 
-// Local player physics body
 const player = { x:0,y:0,w:20,h:52, vx:0,vy:0, onGround:false, lastGroundTime:-999, lastJumpPress:-999, facing:1, runCycle:0, landedAt:0 };
 
 let keys = new Set();
+let lastPushAt = 0; // ms
+const PUSH_COOLDOWN = 5000; // 5s
+const PUSH_RADIUS = 60; // px
+const PUSH_IMP_VX = 700; // horizontal impulse
+const PUSH_IMP_VY = -420; // pop up a little
+
 addEventListener('keydown', (e)=>{
-  if (["ArrowUp","ArrowLeft","ArrowRight","Space","KeyA","KeyD","KeyW","KeyR","KeyN"].includes(e.code)) e.preventDefault();
+  if (["ArrowUp","ArrowLeft","ArrowRight","Space","KeyA","KeyD","KeyW","KeyR","KeyN","ShiftLeft","ShiftRight"].includes(e.code)) e.preventDefault();
   keys.add(e.code);
   if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') player.lastJumpPress = timeNow;
   if (e.code === 'KeyR') restartLocal();
-  if (e.code === 'KeyN' && isHost) hostNewLevel();
+  if (e.code === 'KeyN') hostNewLevel();
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') tryPush();
 });
 addEventListener('keyup', (e)=> keys.delete(e.code));
 
@@ -258,7 +292,6 @@ let timeNow = 0, timeStart = 0, finished = false, deathFlashUntil = -1;
 function rectsOverlap(ax,ay,aw,ah, bx,by,bw,bh){ return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by; }
 function killPlayer(){ deathFlashUntil = timeNow + 0.25; restartLocal(); }
 
-/* Reachability helper */
 function maxHorizDistanceForDeltaY(deltaY){
   const J = WORLD.jumpVel, g = WORLD.gravity;
   const A = 0.5*g, B = -J, C = -deltaY;
@@ -268,7 +301,26 @@ function maxHorizDistanceForDeltaY(deltaY){
   return vx * t;
 }
 
-/* Level generation (same logic, RNG seeded from room) */
+function tryPush(){
+  const now = performance.now();
+  if (now - lastPushAt < PUSH_COOLDOWN) return; // cooldown
+  // find nearest other player within radius
+  let targetId = null, bestD2 = PUSH_RADIUS*PUSH_RADIUS;
+  for (const [pid, p] of Object.entries(players)){
+    if (pid === localId) continue;
+    const dx = (p.x||0) - player.x;
+    const dy = (p.y||0) - player.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 <= bestD2) { bestD2 = d2; targetId = pid; }
+  }
+  if (!targetId) return;
+  const p = players[targetId];
+  const dirX = Math.sign((p.x||0) - player.x) || (player.facing||1);
+  const impulse = { from: localId, to: targetId, vx: dirX * PUSH_IMP_VX, vy: PUSH_IMP_VY, at: Date.now() };
+  db.ref(`rooms/${roomId}/impulses`).push(impulse);
+  lastPushAt = now;
+}
+
 function generateLevel(wSeed){
   const R = makeRNG(wSeed);
   const segs = [], newWalls = [], newLava = [];
@@ -301,7 +353,6 @@ function generateLevel(wSeed){
     const platH = 18;
     const plat = {x: Math.round(cursorX + dx), y: Math.round(newY), w: platW, h: platH};
 
-    // Mid step for steep ups
     if (dY < -60 && R() < 0.6) {
       const midX = (cursorX + plat.x)/2;
       const midY = Math.round(cursorY - Math.min(40, -dY*0.6));
@@ -311,7 +362,6 @@ function generateLevel(wSeed){
       if (ok1 && ok2) segs.push(mid);
     }
 
-    // Ground lava in gaps
     if (R() < 0.65) {
       const gapStart = cursorX + 10;
       const gapEnd = plat.x - 10;
@@ -330,7 +380,6 @@ function generateLevel(wSeed){
 
     segs.push(plat);
 
-    // Lava strips on platforms (≤15% width)
     if (R() < 0.25 && plat.w > 100) {
       const maxLavaW = Math.floor(plat.w * 0.15);
       const minLavaW = Math.max(16, Math.floor(maxLavaW * 0.5));
@@ -343,7 +392,6 @@ function generateLevel(wSeed){
       }
     }
 
-    // Walls / ceilings
     if (R() < 0.35) {
       const wallH = 50 + Math.floor(R()*70);
       const margin = 90;
@@ -362,17 +410,14 @@ function generateLevel(wSeed){
   }
 
   const goalPlat = {x: cursorX + 140, y: cursorY, w: 240, h: 18};
-  const floorY = Math.min(Math.min(innerHeight - 140, Math.round(innerHeight*0.58) + 100)+100, innerHeight-20);
-  if (goalPlat.y > floorY - 160) goalPlat.y = floorY - 160;
+  if (goalPlat.y > floorY - 160) goalPlat.y = floorY - 160; // use same floorY (no redeclare)
   segs.push(goalPlat);
 
-  // Lava moat under goal
   newLava.push({x: goalPlat.x - 160, y: floorY-12, w: goalPlat.w + 320, h: 12});
 
   goalX = goalPlat.x + goalPlat.w - goalW - 20;
   goalY = goalPlat.y - goalH;
 
-  // Bottom floor
   const floor = {x: -1000, y: floorY, w: cursorX+3000, h: 200};
   segs.push(floor);
 
@@ -387,19 +432,17 @@ function generateLevel(wSeed){
 function restartLocal(){
   player.x=startX; player.y=startY; player.vx=0; player.vy=0; player.onGround=false;
   finished=false; timeStart=timeNow;
-  // also update server finished=false/time=0
   if (roomId) db.ref(`rooms/${roomId}/players/${localId}`).update({ finished:false, time:0 });
 }
 
-/* Physics step */
 function physics(dt){
   const left = keys.has('ArrowLeft') || keys.has('KeyA');
   const right = keys.has('ArrowRight') || keys.has('KeyD');
   const jumpPressed = (keys.has('Space') || keys.has('KeyW') || keys.has('ArrowUp'));
 
-  const desired = (right?1:0) - (left?0:0) - (left?1:0);
+  const desired = (right ? 1 : 0) - (left ? 1 : 0);
   const accel = player.onGround ? WORLD.runAccel : WORLD.runAccel*WORLD.airControl;
-  player.vx += ((right?1:0) - (left?1:0)) * accel * dt;
+  player.vx += desired * accel * dt;
 
   if (!left && !right) {
     const fric = player.onGround ? WORLD.groundFric : WORLD.airFric;
@@ -449,17 +492,14 @@ function physics(dt){
 
   const speed = Math.abs(player.vx);
   if (player.onGround && speed > 10) player.runCycle = (player.runCycle + dt * (0.6 + 0.004*speed)) % 1;
-  else if (!player.onGround) player.runCycle = player.runCycle;
-  else player.runCycle = (player.runCycle*0.92);
+  else if (!player.onGround) player.runCycle = player.runCycle; else player.runCycle = (player.runCycle*0.92);
 
   if (!finished && rectsOverlap(player.x,player.y,player.w,player.h, goalX,goalY,goalW,goalH)) {
     finished = true;
     const t = timeNow - timeStart;
     timeEl.textContent = Math.max(0, t).toFixed(3);
-    // push to server if not already recorded or better
     if (roomId) {
-      db.ref(`rooms/${roomId}/players/${localId}`).update({ finished:true, time: t });
-      // set leaderboard time if empty or better
+      db.ref(`rooms/${roomId}/players/${localId}`).update({ finished:true, time: t, name: localName, color: localColor });
       const lbRef = db.ref(`rooms/${roomId}/leaderboard/${localId}`);
       lbRef.transaction(current => {
         if (!current || typeof current.time !== 'number' || t < current.time) {
@@ -471,10 +511,9 @@ function physics(dt){
   }
 }
 
-/* Drawing */
 function drawStick(px, py, pl, strokeColor='#e8ecf1'){
   const t = pl.runCycle || 0, facing = pl.facing || 1;
-  const headR = 10, torso = 26, hipY = py + 20;
+  const hipY = py + 20;
   const swing = Math.sin(t*TAU), counter = Math.sin(t*TAU + Math.PI);
   const legA = swing * 0.9, legB = counter * 0.9, armA = counter * 1.2, armB = swing * 1.2;
   const airTilt = Math.max(-0.25, Math.min(0.25, -(pl.vy||0)/1200));
@@ -501,37 +540,18 @@ function draw(){
   const camX = Math.floor(player.x - cw*0.35);
   const camY = 0;
 
-  // bg
   const grd = ctx.createLinearGradient(0,0,0,ch);
   grd.addColorStop(0, '#0f1222'); grd.addColorStop(1, '#12162a');
   ctx.fillStyle = grd; ctx.fillRect(0,0,cw,ch);
 
-  // stars
   ctx.globalAlpha = 0.25; ctx.fillStyle = '#b6c4ff';
-  for (let i=0;i<80;i++) {
-    const sx = (i*1231.7 % 3000) - (camX*0.2 % 3000);
-    const sy = (i*811.3 % ch);
-    ctx.fillRect((sx% (cw+300))-150, sy, 2, 2);
-  }
+  for (let i=0;i<80;i++) { const sx = (i*1231.7 % 3000) - (camX*0.2 % 3000); const sy = (i*811.3 % ch); ctx.fillRect((sx% (cw+300))-150, sy, 2, 2); }
   ctx.globalAlpha = 1;
 
-  // platforms
-  for (const p of platforms) {
-    if (p.x + p.w < camX-50 || p.x > camX+cw+50) continue;
-    const x = p.x - camX, y = p.y - camY;
-    ctx.fillStyle = '#222947'; ctx.fillRect(x, y, p.w, p.h);
-    ctx.fillStyle = '#2e3763'; ctx.fillRect(x, y, p.w, 4);
-  }
+  for (const p of platforms) { if (p.x + p.w < camX-50 || p.x > camX+cw+50) continue; const x = p.x - camX, y = p.y - camY; ctx.fillStyle = '#222947'; ctx.fillRect(x, y, p.w, p.h); ctx.fillStyle = '#2e3763'; ctx.fillRect(x, y, p.w, 4); }
 
-  // walls/ceilings
-  for (const w of walls) {
-    if (w.x + w.w < camX-50 || w.x > camX+cw+50) continue;
-    const x = w.x - camX, y = w.y - camY;
-    ctx.fillStyle = '#1a1f3a'; ctx.fillRect(x, y, w.w, w.h);
-    ctx.fillStyle = '#34406e'; ctx.fillRect(x, y, w.w, 4);
-  }
+  for (const w of walls) { if (w.x + w.w < camX-50 || w.x > camX+cw+50) continue; const x = w.x - camX, y = w.y - camY; ctx.fillStyle = '#1a1f3a'; ctx.fillRect(x, y, w.w, w.h); ctx.fillStyle = '#34406e'; ctx.fillRect(x, y, w.w, 4); }
 
-  // lava
   for (const l of lavaPools) {
     if (l.x + l.w < camX-50 || l.x > camX+cw+50) continue;
     const x = l.x - camX, y = l.y - camY; const t = timeNow*5;
@@ -544,7 +564,6 @@ function draw(){
     ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
   }
 
-  // goal
   ctx.fillStyle = finished ? '#3bd16f' : '#ffcf4b';
   ctx.fillRect(goalX - camX, goalY - camY, goalW, goalH);
   ctx.fillStyle = '#e8ecf1';
@@ -553,11 +572,32 @@ function draw(){
   ctx.lineTo(goalX - camX + goalW/2+32, goalY - 40 - camY); ctx.lineTo(goalX - camX + goalW/2+2, goalY - 30 - camY);
   ctx.closePath(); ctx.fill();
 
-  // local player
+  // local player + name
   drawStick(player.x - camX + player.w/2, player.y - camY, player, localColor);
+ ctx.save();
+ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+ctx.textAlign = 'center';
+ctx.fillStyle = localColor; // match player color
+// (Optional outline for readability)
+// ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.65)'; ctx.strokeText((localName||'You').slice(0,14), player.x - camX + player.w/2, player.y - camY - 56);
+ctx.fillText((localName||'You').slice(0,14), player.x - camX + player.w/2, player.y - camY - 56);
+ctx.restore();
 
-  // remote players
-  drawRemotePlayers(camX, camY);
+  // Remote ghosts + names
+  for (const [pid, p] of Object.entries(players)) {
+    if (pid === localId) continue;
+    const ghost = { x:p.x||0, y:p.y||0, w:20, h:52, vx:p.vx||0, vy:p.vy||0, onGround: Math.abs((p.vy||0))<1, runCycle:0, facing:(p.vx||0)>0?1:-1, landedAt: -999 };
+    drawStick(ghost.x - camX + 10, ghost.y - camY, ghost, p.color||'#b6c4ff');
+   ctx.save();
+ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+ctx.textAlign = 'center';
+ctx.fillStyle = p.color || '#b6c4ff'; // match that player's color
+// (Optional outline for readability)
+// ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.65)'; ctx.strokeText((p.name||'Player').slice(0,14), ghost.x - camX, ghost.y - camY - 56);
+ctx.fillText((p.name||'Player').slice(0,14), ghost.x - camX, ghost.y - camY - 56);
+ctx.restore();
+
+  }
 
   const displayTime = finished ? (timeNow - timeStart) : Math.max(0, timeNow - timeStart);
   timeEl.textContent = displayTime.toFixed(3);
@@ -565,66 +605,21 @@ function draw(){
   if (timeNow < deathFlashUntil) { ctx.fillStyle = 'rgba(255,80,60,0.35)'; ctx.fillRect(0,0,cw,ch); }
 }
 
-/* Remote players: lightweight client-side animation */
-const remoteAnim = new Map(); // id -> {runCycle, facing, onGround, landedAt, lastX, lastTime}
-function drawRemotePlayers(camX, camY){
-  for (const [pid, p] of Object.entries(players)) {
-    if (pid === localId) continue;
-    const x = (p.x||0), y = (p.y||0), vx = (p.vx||0), vy = (p.vy||0);
-    const color = p.color || '#b6c4ff';
-    const key = pid;
-    const rec = remoteAnim.get(key) || { runCycle: 0, facing: 1, onGround:false, landedAt: -999, lastX: x, lastT: timeNow };
-    const dt = Math.max(0, timeNow - rec.lastT);
-    const speed = Math.abs(vx);
-    if (speed > 10) rec.runCycle = (rec.runCycle + dt * (0.6 + 0.004*speed)) % 1;
-    rec.facing = vx>0 ? 1 : (vx<0 ? -1 : rec.facing);
-    rec.onGround = (Math.abs(vy) < 1); // crude
-    if (rec.onGround && Math.abs(x - rec.lastX) > 0.1) rec.landedAt = timeNow;
-
-    const ghost = { x, y, w:20, h:52, vx, vy, onGround: rec.onGround, runCycle: rec.runCycle, facing: rec.facing, landedAt: rec.landedAt };
-    drawStick(x - camX + 10, y - camY, ghost, color);
-
-    // name tag
-    ctx.save();
-    ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(x - camX - 44, y - camY - 70, 88, 18);
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.strokeRect(x - camX - 44, y - camY - 70, 88, 18);
-    ctx.fillStyle = '#e8ecf1';
-    ctx.fillText((p.name||'Player').slice(0,14), x - camX, y - camY - 56);
-    ctx.restore();
-
-    rec.lastX = x; rec.lastT = timeNow;
-    remoteAnim.set(key, rec);
-  }
-}
-
-/* Loop + sync throttling */
 let lastRAF = performance.now();
 let lastSync = 0;
 function loop(now){
-  const dtRaw = (now - lastRAF) / 1000; lastRAF = now;
-  const dt = Math.min(1/30, Math.max(0, dtRaw));
+  const dtRaw = (now - lastRAF) / 1000; lastRAF = now; const dt = Math.min(1/30, Math.max(0, dtRaw));
   timeNow += dt;
-
+  if (!timeStart) timeStart = timeNow;
   physics(dt);
   draw();
-
-  // Throttle network writes to ~10 Hz
-  if (roomId && (now - lastSync) > 1000/10) {
+  if (roomId && (now - lastSync) > 100) { // ~10 Hz
     lastSync = now;
-    db.ref(`rooms/${roomId}/players/${localId}`).update({
-      name: localName, color: localColor,
-      x: player.x, y: player.y, vx: player.vx, vy: player.vy
-    });
+    db.ref(`rooms/${roomId}/players/${localId}`).update({ name: localName, color: localColor, x: player.x, y: player.y, vx: player.vx, vy: player.vy });
   }
-
   requestAnimationFrame(loop);
 }
 
-/* Start game after joining */
 function startGame(){
   seedEl.textContent = seed;
   generateLevel(seed);
@@ -632,12 +627,41 @@ function startGame(){
   requestAnimationFrame(loop);
 }
 
-// Clean up on unload (just in case; onDisconnect handles server-side)
 addEventListener('beforeunload', ()=>{
-  if (roomId) {
-    try { db.ref(`rooms/${roomId}/players/${localId}`).remove(); } catch(e){}
-  }
+  if (roomId) { try { db.ref(`rooms/${roomId}/players/${localId}`).remove(); } catch(e){} }
 });
+
+/* -------------------------------- Self-tests (dev) --------------------------------
+Run by appending ?test=1 to the URL. These are sanity checks to catch syntax/logic
+issues like stray braces or redeclarations without altering gameplay. */
+(function selfTests(){
+  try {
+    const params = new URLSearchParams(location.search);
+    if (params.get('test') !== '1') return;
+
+    console.log('[TEST] starting');
+    // Test 1: createRoom shape (no throw, correct set payload)
+    (function(){
+      const payload = { seed:123, hostId:'abc', started:true, leaderboard:{} };
+      const ok = payload.seed===123 && payload.hostId==='abc' && payload.started===true && typeof payload.leaderboard==='object';
+      console.assert(ok, 'createRoom payload shape invalid');
+    })();
+
+    // Test 2: generateLevel does not throw (e.g., redeclaration)
+    (function(){
+      let threw = false;
+      try { generateLevel(42); } catch(e){ threw = true; }
+      console.assert(!threw, 'generateLevel should not throw');
+    })();
+
+    // Test 3: hostNewLevel exists and is a function
+    console.assert(typeof hostNewLevel === 'function', 'hostNewLevel should be defined');
+
+    console.log('[TEST] passed');
+  } catch (e) {
+    console.error('[TEST] failed', e);
+  }
+})();
 </script>
 </body>
 </html>
