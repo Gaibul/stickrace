@@ -16,7 +16,7 @@
   #lobby { position: fixed; inset: 0; background: rgba(0,0,0,0.92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
   #lobby .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px; width: min(460px, 92vw); }
   input, button, select { margin: 4px 0; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.15); background: #161a31; color: #e8ecf1; width: 100%; box-sizing: border-box; }
-  #leaderboard span.badge { background: rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); padding: 2px 8px; border-radius: 999px; margin-right: 6px; display:inline-block; }
+  #leaderboard span.badge, #seriesboard span.badge { background: rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); padding: 2px 8px; border-radius: 999px; margin-right: 6px; display:inline-block; }
 </style>
 <!-- Firebase compat (v8.x API) -->
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
@@ -44,6 +44,7 @@
   <div id="ui" style="display:none">
     <div class="pill">🧩 Room: <span id="roomCode">—</span></div>
     <div class="pill">🎲 Seed: <span id="seed">—</span></div>
+    <div class="pill">🔁 Round: <span id="roundIdx">1</span></div>
     <div class="pill">⏱️ Your Time: <span id="time">0.000</span>s</div>
     <div class="pill" id="hostOnly" style="display:none; gap:8px;">
       <button id="newLevelBtn">New Level</button>
@@ -51,9 +52,10 @@
     </div>
     <div class="spacer"></div>
     <div class="pill">🏁 Leaderboard: <span id="leaderboard"></span></div>
+    <div class="pill">🏆 Series: <span id="seriesboard"></span></div>
   </div>
 
-  <div id="help">Move: A/D or ⬅️/➡️ · Jump: W/⬆️/Space · Hold for higher jump · R Restart (you) · N (host): New Level · Shift: Push nearby player (5s cd) · Touch lava = reset</div>
+  <div id="help">Move: A/D or ⬅️/➡️ · Jump: W/⬆️/Space · Hold for higher jump · R Restart (you) · N (host): New Level · Shift: Push nearby player (2s cd) · Touch lava = reset</div>
   <canvas id="game"></canvas>
 
 <script>
@@ -80,6 +82,8 @@ let hostId = null;
 let seed = 0;
 let players = {};      // realtime snapshot of room players
 let leaderboard = {};  // id -> {name, time}
+let seriesScores = {}; // id -> {name, points}
+let roundIdx = 1;
 let isHost = false;
 
 // UI refs
@@ -90,6 +94,8 @@ const roomCodeEl = document.getElementById('roomCode');
 const seedEl = document.getElementById('seed');
 const timeEl = document.getElementById('time');
 const lbEl = document.getElementById('leaderboard');
+const seriesEl = document.getElementById('seriesboard');
+const roundIdxEl = document.getElementById('roundIdx');
 const hostOnly = document.getElementById('hostOnly');
 const newLevelBtn = document.getElementById('newLevelBtn');
 const restartBtn = document.getElementById('restartBtn');
@@ -115,7 +121,9 @@ async function createRoom() {
       seed: seed,
       hostId: hostId,
       started: true,
-      leaderboard: {}
+      leaderboard: {},
+      scores: {},
+      roundIndex: 1
     });
 
     await joinRoomInternal(roomId);
@@ -166,15 +174,30 @@ async function joinRoomInternal(code) {
   });
   playerRef.onDisconnect().remove();
 
+  // players
   db.ref(`rooms/${roomId}/players`).on('value', snap => {
     players = snap.val() || {};
   });
 
+  // per-level leaderboard
   db.ref(`rooms/${roomId}/leaderboard`).on('value', snap => {
     leaderboard = snap.val() || {};
     renderLeaderboard();
   });
 
+  // series scores across levels
+  db.ref(`rooms/${roomId}/scores`).on('value', snap => {
+    seriesScores = snap.val() || {};
+    renderSeriesboard();
+  });
+
+  // round index
+  db.ref(`rooms/${roomId}/roundIndex`).on('value', snap => {
+    roundIdx = snap.val() || 1;
+    roundIdxEl.textContent = roundIdx;
+  });
+
+  // new seed from host
   db.ref(`rooms/${roomId}/seed`).on('value', snap => {
     const newSeed = snap.val();
     if (typeof newSeed === 'number' && newSeed !== seed) {
@@ -186,12 +209,14 @@ async function joinRoomInternal(code) {
     }
   });
 
+  // hostId changes
   db.ref(`rooms/${roomId}/hostId`).on('value', snap => {
     hostId = snap.val();
     isHost = (hostId === localId);
     hostOnly.style.display = isHost ? 'inline-flex' : 'none';
   });
 
+  // push impulses (fun)
   db.ref(`rooms/${roomId}/impulses`).on('child_added', snap => {
     const imp = snap.val();
     if (imp && imp.to === localId) {
@@ -208,8 +233,18 @@ async function joinRoomInternal(code) {
 async function hostNewLevel() {
   if (!roomId) return;
   if (!isHost) { alert('Only the host can start a new level.'); return; }
+  // award points for the round that just ended
+  await awardRoundPoints();
+  // compute next round index
+  let nextIdx = 1;
+  try {
+    const idxSnap = await db.ref(`rooms/${roomId}/roundIndex`).get();
+    nextIdx = ((idxSnap.val()|0) + 1) || 1;
+  } catch(e){}
+  // new seed & clear current leaderboard, set next round
   const newSeed = Math.floor(Math.random()*1e9);
-  await db.ref(`rooms/${roomId}`).update({ seed: newSeed, leaderboard: {} });
+  await db.ref(`rooms/${roomId}`).update({ seed: newSeed, leaderboard: {}, roundIndex: nextIdx });
+  // Reset each player's finished/time
   const pSnap = await db.ref(`rooms/${roomId}/players`).get();
   if (pSnap.exists()) {
     const vals = pSnap.val();
@@ -224,6 +259,11 @@ function renderLeaderboard() {
   const rows = Object.entries(leaderboard).map(([pid, row]) => ({ pid, name: row.name || 'Player', time: +row.time || 0 }));
   rows.sort((a,b)=> a.time - b.time);
   lbEl.innerHTML = rows.map(r => `<span class="badge">${escapeHTML(r.name)} — ${r.time.toFixed(3)}s</span>`).join(' ');
+}
+function renderSeriesboard(){
+  const rows = Object.entries(seriesScores).map(([pid, row]) => ({ pid, name: row.name || 'Player', points: +row.points || 0 }));
+  rows.sort((a,b)=> a.points - b.points || (a.name||'').localeCompare(b.name||''));
+  seriesEl.innerHTML = rows.map(r => `<span class="badge">${escapeHTML(r.name)} — ${r.points} pts</span>`).join(' ');
 }
 function escapeHTML(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'}[c])); }
 
@@ -275,8 +315,8 @@ const player = { x:0,y:0,w:20,h:52, vx:0,vy:0, onGround:false, lastGroundTime:-9
 
 let keys = new Set();
 let lastPushAt = 0; // ms
-const PUSH_COOLDOWN = 5000; // 5s
-const PUSH_RADIUS = 60; // px (world units due to uniform scale)
+const PUSH_COOLDOWN = 2000; // 2s
+const PUSH_RADIUS = 60; // world units
 const PUSH_IMP_VX = 700; // horizontal impulse
 const PUSH_IMP_VY = -420; // pop up a little
 
@@ -307,6 +347,14 @@ const P = {
   goalX:0, goalY:0, goalW:60, goalH:12,
   last: performance.now(), t: 0
 };
+function maxHorizDistanceForDeltaY(deltaY){
+  const J = WORLD.jumpVel, g = WORLD.gravity;
+  const A = 0.5*g, B = -J, C = -deltaY;
+  const disc = B*B - 4*A*C; if (disc < 0) return 0;
+  const t = (-B + Math.sqrt(disc)) / (2*A);
+  const vx = WORLD.maxSpeed * 0.95;
+  return vx * t;
+}
 function generatePracticeLevel(seed){
   const R = makeRNG(seed);
   const segs = [], newWalls = [], newLava = [];
@@ -410,15 +458,6 @@ let timeNow = 0, timeStart = 0, finished = false, deathFlashUntil = -1;
 function rectsOverlap(ax,ay,aw,ah, bx,by,bw,bh){ return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by; }
 function killPlayer(){ deathFlashUntil = timeNow + 0.25; restartLocal(); }
 
-function maxHorizDistanceForDeltaY(deltaY){
-  const J = WORLD.jumpVel, g = WORLD.gravity;
-  const A = 0.5*g, B = -J, C = -deltaY;
-  const disc = B*B - 4*A*C; if (disc < 0) return 0;
-  const t = (-B + Math.sqrt(disc)) / (2*A);
-  const vx = WORLD.maxSpeed * 0.95;
-  return vx * t;
-}
-
 function tryPush(){
   const now = performance.now();
   if (now - lastPushAt < PUSH_COOLDOWN) return;
@@ -436,6 +475,42 @@ function tryPush(){
   const impulse = { from: localId, to: targetId, vx: dirX * PUSH_IMP_VX, vy: PUSH_IMP_VY, at: Date.now() };
   db.ref(`rooms/${roomId}/impulses`).push(impulse);
   lastPushAt = now;
+}
+
+/* ---- scoring helpers ---- */
+function calculateRoundPoints(playersObj, lbObj, oldScores){
+  const scores = { ...(oldScores||{}) };
+  const playerIds = Object.keys(playersObj||{});
+  const nPlayers = playerIds.length || 0;
+  const finList = Object.entries(lbObj||{})
+    .filter(([pid, row]) => typeof row.time === 'number' && isFinite(row.time))
+    .sort((a,b)=> a[1].time - b[1].time);
+  // Award finishers 1..k
+  finList.forEach(([pid, row], i) => {
+    const prev = (scores[pid]?.points)|0;
+    const name = (playersObj[pid]?.name) || row.name || scores[pid]?.name || 'Player';
+    scores[pid] = { name, points: prev + (i+1) };
+  });
+  // DNFs get nPlayers points
+  for (const pid of playerIds){
+    if (finList.find(([id])=>id===pid)) continue;
+    const prev = (scores[pid]?.points)|0;
+    const name = (playersObj[pid]?.name) || scores[pid]?.name || 'Player';
+    scores[pid] = { name, points: prev + (nPlayers || 1) };
+  }
+  return scores;
+}
+async function awardRoundPoints(){
+  const [pSnap, lbSnap, scSnap] = await Promise.all([
+    db.ref(`rooms/${roomId}/players`).get(),
+    db.ref(`rooms/${roomId}/leaderboard`).get(),
+    db.ref(`rooms/${roomId}/scores`).get()
+  ]);
+  const playersObj = pSnap.val() || {};
+  const lbObj = lbSnap.val() || {};
+  const oldScores = scSnap.val() || {};
+  const newScores = calculateRoundPoints(playersObj, lbObj, oldScores);
+  await db.ref(`rooms/${roomId}/scores`).set(newScores);
 }
 
 function generateLevel(wSeed){
@@ -736,6 +811,13 @@ issues like stray braces or redeclarations without altering gameplay. */
     (function(){ const r1 = rippleRadius(-5), r2 = rippleRadius(0), r3 = rippleRadius(0.12), r4 = rippleRadius(1); console.assert(r1 >= 10 && r2 >= 10 && r3 >= 10 && r4 >= 10, 'ripple radius should never be negative'); })();
     // New test: world scaling deterministic regardless of window
     (function(){ const h = WORLD_H; console.assert(h === 900, 'WORLD_H should be constant for all clients'); })();
+    // Scoring tests
+    (function(){
+      const players = { a:{name:'A'}, b:{name:'B'}, c:{name:'C'} };
+      const lb = { a:{name:'A', time: 5}, c:{name:'C', time: 9} };
+      const out = calculateRoundPoints(players, lb, {});
+      console.assert(out.a.points===1 && out.c.points===2 && out.b.points===3, 'scoring logic failed');
+    })();
     console.log('[TEST] passed');
   } catch (e) { console.error('[TEST] failed', e); }
 })();
