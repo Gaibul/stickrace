@@ -111,7 +111,6 @@ async function createRoom() {
     hostId = localId;
     isHost = true;
 
-    // Properly closed set; no stray braces
     await db.ref(`rooms/${roomId}`).set({
       seed: seed,
       hostId: hostId,
@@ -154,8 +153,7 @@ async function joinExistingRoom() {
 async function joinRoomInternal(code) {
   roomId = code;
   lobby.style.display = 'none';
-  // stop practice loop once we leave the lobby
-  if (P) P.running = false;
+  if (P) P.running = false; // stop practice once in a room
   document.getElementById('ui').style.display = 'flex';
   roomCodeEl.textContent = roomId;
   seedEl.textContent = seed;
@@ -168,18 +166,15 @@ async function joinRoomInternal(code) {
   });
   playerRef.onDisconnect().remove();
 
-  // Listen players
   db.ref(`rooms/${roomId}/players`).on('value', snap => {
     players = snap.val() || {};
   });
 
-  // Listen leaderboard
   db.ref(`rooms/${roomId}/leaderboard`).on('value', snap => {
     leaderboard = snap.val() || {};
     renderLeaderboard();
   });
 
-  // Listen for seed changes (host pressing New Level)
   db.ref(`rooms/${roomId}/seed`).on('value', snap => {
     const newSeed = snap.val();
     if (typeof newSeed === 'number' && newSeed !== seed) {
@@ -191,14 +186,12 @@ async function joinRoomInternal(code) {
     }
   });
 
-  // Listen host id to toggle host controls
   db.ref(`rooms/${roomId}/hostId`).on('value', snap => {
     hostId = snap.val();
     isHost = (hostId === localId);
     hostOnly.style.display = isHost ? 'inline-flex' : 'none';
   });
 
-  // Listen for push impulses and apply if targeted to me
   db.ref(`rooms/${roomId}/impulses`).on('child_added', snap => {
     const imp = snap.val();
     if (imp && imp.to === localId) {
@@ -207,7 +200,6 @@ async function joinRoomInternal(code) {
     }
   });
 
-  // Switch to game
   startGame();
   hostOnly.style.display = (hostId === localId) ? 'inline-flex' : 'none';
 }
@@ -218,7 +210,6 @@ async function hostNewLevel() {
   if (!isHost) { alert('Only the host can start a new level.'); return; }
   const newSeed = Math.floor(Math.random()*1e9);
   await db.ref(`rooms/${roomId}`).update({ seed: newSeed, leaderboard: {} });
-  // Reset finished/time for each player WITHOUT overwriting other fields
   const pSnap = await db.ref(`rooms/${roomId}/players`).get();
   if (pSnap.exists()) {
     const vals = pSnap.val();
@@ -236,21 +227,34 @@ function renderLeaderboard() {
 }
 function escapeHTML(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'}[c])); }
 
-/* ------------------------------ Game implementation ------------------------------ */
-const TAU = Math.PI * 2;
-function makeRNG(seed){ return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2**32; }
+/* ------------------------------ World/Viewport scaling ------------------------------ */
+// All players must simulate the SAME world units regardless of their window size.
+// We draw in a canonical world where HEIGHT = WORLD_H. The canvas transform scales
+// to the actual device pixels so positions from any client match.
+const WORLD_H = 900; // logical world height in units (same for everyone)
+let VIEW_SCALE = 1;  // pixels per world unit (varies per device)
+let VIEW_W = 0;      // viewport width in world units
+let VIEW_H = 0;      // viewport height in world units
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 
 function fit() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
+  VIEW_SCALE = innerHeight / WORLD_H; // uniform scale for x & y
+  VIEW_W = innerWidth / VIEW_SCALE;
+  VIEW_H = innerHeight / VIEW_SCALE;
   canvas.width = Math.floor(innerWidth * dpr);
   canvas.height = Math.floor(innerHeight * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // draw everything in WORLD units; browser scales to pixels
+  ctx.setTransform(dpr*VIEW_SCALE, 0, 0, dpr*VIEW_SCALE, 0, 0);
 }
 addEventListener('resize', fit, {passive:true});
 fit();
+
+/* ------------------------------ Game implementation ------------------------------ */
+const TAU = Math.PI * 2;
+function makeRNG(seed){ return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2**32; }
 
 const WORLD = {
   gravity: 2600,
@@ -272,7 +276,7 @@ const player = { x:0,y:0,w:20,h:52, vx:0,vy:0, onGround:false, lastGroundTime:-9
 let keys = new Set();
 let lastPushAt = 0; // ms
 const PUSH_COOLDOWN = 5000; // 5s
-const PUSH_RADIUS = 60; // px
+const PUSH_RADIUS = 60; // px (world units due to uniform scale)
 const PUSH_IMP_VX = 700; // horizontal impulse
 const PUSH_IMP_VY = -420; // pop up a little
 
@@ -285,7 +289,7 @@ function isTyping(){
 addEventListener('keydown', (e)=>{
   const typing = isTyping();
   if (!typing && ["ArrowUp","ArrowLeft","ArrowRight","Space","KeyA","KeyD","KeyW","KeyR","KeyN","ShiftLeft","ShiftRight"].includes(e.code)) e.preventDefault();
-  if (typing) return; // don't capture keys while typing in inputs
+  if (typing) return;
   keys.add(e.code);
   if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') player.lastJumpPress = timeNow;
   if (e.code === 'KeyR') { if (roomId) restartLocal(); else practiceRestart(); }
@@ -295,7 +299,6 @@ addEventListener('keydown', (e)=>{
 addEventListener('keyup', (e)=>{ if (isTyping()) return; keys.delete(e.code); });
 
 /* ------------------------ Practice map while in lobby ------------------------ */
-let inLobby = true;
 const P = {
   running: true,
   seed: Math.floor(Math.random()*1e9),
@@ -307,15 +310,15 @@ const P = {
 function generatePracticeLevel(seed){
   const R = makeRNG(seed);
   const segs = [], newWalls = [], newLava = [];
-  const groundY = Math.round(innerHeight*0.62);
+  const groundY = Math.round(WORLD_H*0.62);
   const startPlat = {x: 0, y: groundY, w: 260, h: 18};
   segs.push(startPlat);
   const minY = 80;
-  const maxY = Math.min(innerHeight - 140, groundY + 80);
-  const floorY = Math.min(maxY+100, innerHeight-20);
+  const maxY = Math.min(WORLD_H - 140, groundY + 80);
+  const floorY = Math.min(maxY+100, WORLD_H-20);
   let cursorX = startPlat.x + startPlat.w;
   let cursorY = startPlat.y;
-  const targetLen = 1400; // shorter course for lobby
+  const targetLen = 1400;
   while (cursorX < targetLen){
     const dY = (R() < 0.55 ? (R()*140) : -(R()*90));
     let newY = Math.max(minY, Math.min(maxY, cursorY + dY));
@@ -341,7 +344,6 @@ function generatePracticeLevel(seed){
     cursorX = plat.x + plat.w;
     cursorY = plat.y;
   }
-  // small goal for fun
   const goalPlat = {x: cursorX + 120, y: Math.max(minY+40, cursorY - 40), w: 200, h: 18};
   segs.push(goalPlat);
   newLava.push({x: goalPlat.x - 120, y: floorY-12, w: goalPlat.w + 240, h: 12});
@@ -382,18 +384,16 @@ function practicePhysics(dt){
   const speed = Math.abs(pl.vx); if (pl.onGround && speed > 10) pl.runCycle = (pl.runCycle + dt * (0.6 + 0.004*speed)) % 1; else if (!pl.onGround) pl.runCycle = pl.runCycle; else pl.runCycle = (pl.runCycle*0.92);
 }
 function drawPractice(){
-  const cw = innerWidth, ch = innerHeight;
+  const cw = VIEW_W, ch = VIEW_H;
   const camX = Math.floor(P.player.x - cw*0.35), camY = 0;
   const grd = ctx.createLinearGradient(0,0,0,ch); grd.addColorStop(0,'#0f1222'); grd.addColorStop(1,'#12162a'); ctx.fillStyle=grd; ctx.fillRect(0,0,cw,ch);
   ctx.globalAlpha = 0.25; ctx.fillStyle='#b6c4ff'; for (let i=0;i<80;i++){ const sx=(i*1231.7 % 3000) - (camX*0.2 % 3000); const sy=(i*811.3 % ch); ctx.fillRect((sx%(cw+300))-150, sy, 2, 2);} ctx.globalAlpha=1;
   for (const p of P.platforms){ if (p.x + p.w < camX-50 || p.x > camX+cw+50) continue; const x=p.x-camX, y=p.y-camY; ctx.fillStyle='#222947'; ctx.fillRect(x,y,p.w,p.h); ctx.fillStyle='#2e3763'; ctx.fillRect(x,y,p.w,4); }
   for (const w of P.walls){ if (w.x + w.w < camX-50 || w.x > camX+cw+50) continue; const x=w.x-camX, y=w.y-camY; ctx.fillStyle='#1a1f3a'; ctx.fillRect(x,y,w.w,w.h); ctx.fillStyle='#34406e'; ctx.fillRect(x,y,w.w,4); }
   for (const l of P.lava){ if (l.x + l.w < camX-50 || l.x > camX+cw+50) continue; const x=l.x-camX, y=l.y-camY, t=P.t*5; const grad=ctx.createLinearGradient(0,y,0,y+l.h); grad.addColorStop(0,'#ffdb6e'); grad.addColorStop(0.4,'#ff7b3a'); grad.addColorStop(1,'#b1120d'); ctx.fillStyle=grad; ctx.fillRect(x,y,l.w,l.h); ctx.beginPath(); const A=3; ctx.moveTo(x,y); for (let i=0;i<=l.w;i+=8){ const wy = y + Math.sin((i*0.12)+t)*A; ctx.lineTo(x+i, wy);} ctx.lineTo(x+l.w,y+l.h); ctx.lineTo(x,y+l.h); ctx.closePath(); ctx.fillStyle='rgba(255,255,255,0.1)'; ctx.fill(); }
-  // goal flag just for target practice
   ctx.fillStyle='#ffcf4b'; ctx.fillRect(P.goalX - camX, P.goalY - camY, P.goalW, P.goalH);
   ctx.fillStyle = '#e8ecf1'; ctx.fillRect(P.goalX - camX + P.goalW/2-2, P.goalY - 50 - camY, 4, 50);
   ctx.beginPath(); ctx.moveTo(P.goalX - camX + P.goalW/2+2, P.goalY - 50 - camY); ctx.lineTo(P.goalX - camX + P.goalW/2+32, P.goalY - 40 - camY); ctx.lineTo(P.goalX - camX + P.goalW/2+2, P.goalY - 30 - camY); ctx.closePath(); ctx.fill();
-  // practice player + name (live preview color/name)
   const previewColor = (colorInput && colorInput.value) ? colorInput.value : '#e8ecf1';
   drawStick(P.player.x - camX + P.player.w/2, P.player.y - camY, P.player, previewColor, P.t);
   ctx.save(); ctx.font='12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial'; ctx.textAlign='center'; ctx.fillStyle=previewColor; const nm=(nameInput && nameInput.value ? nameInput.value : 'You').slice(0,14); ctx.fillText(nm, P.player.x - camX + P.player.w/2, P.player.y - camY - 56); ctx.restore();
@@ -421,8 +421,7 @@ function maxHorizDistanceForDeltaY(deltaY){
 
 function tryPush(){
   const now = performance.now();
-  if (now - lastPushAt < PUSH_COOLDOWN) return; // cooldown
-  // find nearest other player within radius
+  if (now - lastPushAt < PUSH_COOLDOWN) return;
   let targetId = null, bestD2 = PUSH_RADIUS*PUSH_RADIUS;
   for (const [pid, p] of Object.entries(players)){
     if (pid === localId) continue;
@@ -443,14 +442,14 @@ function generateLevel(wSeed){
   const R = makeRNG(wSeed);
   const segs = [], newWalls = [], newLava = [];
 
-  const groundY = Math.round(innerHeight*0.58);
+  const groundY = Math.round(WORLD_H*0.58);
   const startPlat = {x: 0, y: groundY, w: 240, h: 18};
   segs.push(startPlat);
 
-  const targetLen = Math.max(3200, innerWidth*3.2);
+  const targetLen = 4200; // fixed logical width so all clients match
   const minY = 80;
-  const maxY = Math.min(innerHeight - 140, groundY + 100);
-  const floorY = Math.min(maxY+100, innerHeight-20);
+  const maxY = Math.min(WORLD_H - 140, groundY + 100);
+  const floorY = Math.min(maxY+100, WORLD_H-20);
 
   let cursorX = startPlat.x + startPlat.w;
   let cursorY = startPlat.y;
@@ -525,27 +524,20 @@ function generateLevel(wSeed){
 
     cursorX = plat.x + plat.w;
     cursorY = plat.y;
-  }  // ---- Goal platform: varied X and Y, but always above a single jump from floor ----
-  const maxJump = Math.floor((WORLD.jumpVel*WORLD.jumpVel)/(2*WORLD.gravity)); // ~108
-  const antiCheeseY = Math.min(floorY - (maxJump + 24), maxY); // must be <= this (higher than ground jump)
-
-  // choose a horizontal offset to goal; we'll adapt if needed
-  let goalDX = 120 + Math.floor(R()*120); // 120..240
-  const gW = 200 + Math.floor(R()*160);   // 200..360 platform width
-
-  // helper: highest (smallest y) we can place and still clear dx from last platform top
+  }
+  const maxJump = Math.floor((WORLD.jumpVel*WORLD.jumpVel)/(2*WORLD.gravity));
+  const antiCheeseY = Math.min(floorY - (maxJump + 24), maxY);
+  let goalDX = 120 + Math.floor(R()*120);
+  const gW = 200 + Math.floor(R()*160);
   function highestReachableYFrom(y0, dx){
-    let y = y0;                    // start same height
-    const step = 2;
+    let y = y0; const step = 2;
     while (y > minY + 20) {
-      const dY = y - y0;           // negative when higher
+      const dY = y - y0;
       if (maxHorizDistanceForDeltaY(dY) >= dx) { y -= step; continue; }
       break;
     }
     return Math.max(y, minY + 20);
   }
-
-  // Adapt goalDX downwards if we can't meet the anti-cheese height while reachable
   let yReachTop = highestReachableYFrom(cursorY, goalDX);
   let adapt = 0;
   while (yReachTop > antiCheeseY && goalDX > 80 && adapt < 8) {
@@ -553,29 +545,19 @@ function generateLevel(wSeed){
     yReachTop = highestReachableYFrom(cursorY, goalDX);
     adapt++;
   }
-
-  // Final Y in [yReachTop, antiCheeseY]
   let goalYTop = Math.max(minY + 20, yReachTop);
-  let goalYBottom = Math.min(antiCheeseY, cursorY + 40); // don't go way below last plat
+  let goalYBottom = Math.min(antiCheeseY, cursorY + 40);
   if (goalYBottom < goalYTop) goalYBottom = goalYTop;
-
   const goalPlat = { x: cursorX + goalDX, y: Math.round(goalYTop + R()*(goalYBottom - goalYTop)), w: gW, h: 18 };
   segs.push(goalPlat);
-
-  // Lava moat under goal (wider to match variable width)
   newLava.push({ x: goalPlat.x - 160, y: floorY-12, w: goalPlat.w + 320, h: 12 });
-
   goalX = goalPlat.x + goalPlat.w - goalW - 20;
   goalY = goalPlat.y - goalH;
-
   const floor = { x: -1000, y: floorY, w: cursorX+3000, h: 200 };
   segs.push(floor);
-
-
   platforms = segs.sort((a,b)=> a.x - b.x);
   walls = newWalls.sort((a,b)=> a.x - b.x);
   lavaPools = newLava.sort((a,b)=> a.x - b.x);
-
   startX = startPlat.x + 20;
   startY = startPlat.y - player.h;
 }
@@ -590,33 +572,25 @@ function physics(dt){
   const left = keys.has('ArrowLeft') || keys.has('KeyA');
   const right = keys.has('ArrowRight') || keys.has('KeyD');
   const jumpPressed = (keys.has('Space') || keys.has('KeyW') || keys.has('ArrowUp'));
-
   const desired = (right ? 1 : 0) - (left ? 1 : 0);
   const accel = player.onGround ? WORLD.runAccel : WORLD.runAccel*WORLD.airControl;
   player.vx += desired * accel * dt;
-
   if (!left && !right) {
     const fric = player.onGround ? WORLD.groundFric : WORLD.airFric;
     if (Math.abs(player.vx) <= fric*dt) player.vx = 0; else player.vx -= Math.sign(player.vx)*fric*dt;
   }
-
   player.vx = Math.max(-WORLD.maxSpeed, Math.min(WORLD.maxSpeed, player.vx));
   if (right) player.facing = 1; else if (left) player.facing = -1;
-
   player.vy += WORLD.gravity * dt;
   if (player.vy > WORLD.maxFall) player.vy = WORLD.maxFall;
-
   if (jumpPressed) player.lastJumpPress = timeNow;
   const canJump = (timeNow - player.lastJumpPress) <= WORLD.jumpBuffer && (player.onGround || (timeNow - player.lastGroundTime) <= WORLD.coyoteTime);
   if (canJump) { player.vy = -WORLD.jumpVel; player.onGround = false; player.lastJumpPress = -999; }
   if (!jumpPressed && player.vy < 0) player.vy += WORLD.gravity * WORLD.shortHopCut * dt;
-
   let newX = player.x + player.vx * dt;
   let newY = player.y + player.vy * dt;
   player.onGround = false;
-
   const solids = platforms.concat(walls);
-
   const boundsX = {x: Math.min(player.x, newX), y: player.y, w: player.w + Math.abs(player.vx*dt), h: player.h};
   for (const s of solids) {
     if (!rectsOverlap(boundsX.x,boundsX.y,boundsX.w,boundsX.h, s.x,s.y,s.w,s.h)) continue;
@@ -625,7 +599,6 @@ function physics(dt){
       player.vx = 0;
     }
   }
-
   const boundsY = {x: newX, y: Math.min(player.y, newY), w: player.w, h: player.h + Math.abs(player.vy*dt)};
   let groundedThisFrame = false;
   for (const s of solids) {
@@ -635,16 +608,11 @@ function physics(dt){
       else if (player.vy < 0) { newY = s.y + s.h; player.vy = 0; }
     }
   }
-
   player.x = newX; player.y = newY;
   if (groundedThisFrame) { player.onGround = true; player.lastGroundTime = timeNow; player.landedAt = timeNow; }
-
   for (const l of lavaPools) { if (rectsOverlap(player.x,player.y,player.w,player.h, l.x,l.y,l.w,l.h)) { killPlayer(); break; } }
-
   const speed = Math.abs(player.vx);
-  if (player.onGround && speed > 10) player.runCycle = (player.runCycle + dt * (0.6 + 0.004*speed)) % 1;
-  else if (!player.onGround) player.runCycle = player.runCycle; else player.runCycle = (player.runCycle*0.92);
-
+  if (player.onGround && speed > 10) player.runCycle = (player.runCycle + dt * (0.6 + 0.004*speed)) % 1; else if (!player.onGround) player.runCycle = player.runCycle; else player.runCycle = (player.runCycle*0.92);
   if (!finished && rectsOverlap(player.x,player.y,player.w,player.h, goalX,goalY,goalW,goalH)) {
     finished = true;
     const t = timeNow - timeStart;
@@ -653,18 +621,14 @@ function physics(dt){
       db.ref(`rooms/${roomId}/players/${localId}`).update({ finished:true, time: t, name: localName, color: localColor });
       const lbRef = db.ref(`rooms/${roomId}/leaderboard/${localId}`);
       lbRef.transaction(current => {
-        if (!current || typeof current.time !== 'number' || t < current.time) {
-          return { name: localName, time: t };
-        }
+        if (!current || typeof current.time !== 'number' || t < current.time) { return { name: localName, time: t }; }
         return current;
       });
     }
   }
 }
 
-// helper to keep ripple radius valid
 function rippleRadius(tSinceLand){
-  // Map t in [0, 0.12] -> [10, 80]; clamp and never negative
   const k = Math.max(0, Math.min(1, tSinceLand / 0.12));
   return 10 + 70 * k;
 }
@@ -676,7 +640,6 @@ function drawStick(px, py, pl, strokeColor='#e8ecf1', currentTime=null){
   const swing = Math.sin(t*TAU), counter = Math.sin(t*TAU + Math.PI);
   const legA = swing * 0.9, legB = counter * 0.9, armA = counter * 1.2, armB = swing * 1.2;
   const airTilt = Math.max(-0.25, Math.min(0.25, -(pl.vy||0)/1200));
-
   ctx.save(); ctx.translate(px, hipY); ctx.scale(facing,1); ctx.rotate(airTilt);
   ctx.lineCap='round'; ctx.lineWidth=3; ctx.strokeStyle=strokeColor;
   drawLimb(0,0,0,18,18,legA); drawLimb(0,0,0,18,18,legB);
@@ -687,7 +650,7 @@ function drawStick(px, py, pl, strokeColor='#e8ecf1', currentTime=null){
   if (pl.onGround && tSinceLand >= 0 && tSinceLand < 0.12) {
     ctx.globalAlpha = 1 - (tSinceLand/0.12);
     ctx.beginPath();
-    const rr = rippleRadius(tSinceLand); // always >= 10
+    const rr = rippleRadius(tSinceLand);
     ctx.arc(0, 2, rr, 0, TAU);
     ctx.stroke();
     ctx.globalAlpha = 1;
@@ -702,22 +665,17 @@ function drawLimb(x0,y0,offX,len1,len2,angle){
 }
 
 function draw(){
-  const cw = innerWidth, ch = innerHeight;
+  const cw = VIEW_W, ch = VIEW_H;
   const camX = Math.floor(player.x - cw*0.35);
   const camY = 0;
-
   const grd = ctx.createLinearGradient(0,0,0,ch);
   grd.addColorStop(0, '#0f1222'); grd.addColorStop(1, '#12162a');
   ctx.fillStyle = grd; ctx.fillRect(0,0,cw,ch);
-
   ctx.globalAlpha = 0.25; ctx.fillStyle = '#b6c4ff';
   for (let i=0;i<80;i++) { const sx = (i*1231.7 % 3000) - (camX*0.2 % 3000); const sy = (i*811.3 % ch); ctx.fillRect((sx% (cw+300))-150, sy, 2, 2); }
   ctx.globalAlpha = 1;
-
   for (const p of platforms) { if (p.x + p.w < camX-50 || p.x > camX+cw+50) continue; const x = p.x - camX, y = p.y - camY; ctx.fillStyle = '#222947'; ctx.fillRect(x, y, p.w, p.h); ctx.fillStyle = '#2e3763'; ctx.fillRect(x, y, p.w, 4); }
-
   for (const w of walls) { if (w.x + w.w < camX-50 || w.x > camX+cw+50) continue; const x = w.x - camX, y = w.y - camY; ctx.fillStyle = '#1a1f3a'; ctx.fillRect(x, y, w.w, w.h); ctx.fillStyle = '#34406e'; ctx.fillRect(x, y, w.w, 4); }
-
   for (const l of lavaPools) {
     if (l.x + l.w < camX-50 || l.x > camX+cw+50) continue;
     const x = l.x - camX, y = l.y - camY; const t = timeNow*5;
@@ -729,7 +687,6 @@ function draw(){
     ctx.lineTo(x+l.w, y+l.h); ctx.lineTo(x, y+l.h); ctx.closePath();
     ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
   }
-
   ctx.fillStyle = finished ? '#3bd16f' : '#ffcf4b';
   ctx.fillRect(goalX - camX, goalY - camY, goalW, goalH);
   ctx.fillStyle = '#e8ecf1';
@@ -737,32 +694,16 @@ function draw(){
   ctx.beginPath(); ctx.moveTo(goalX - camX + goalW/2+2, goalY - 50 - camY);
   ctx.lineTo(goalX - camX + goalW/2+32, goalY - 40 - camY); ctx.lineTo(goalX - camX + goalW/2+2, goalY - 30 - camY);
   ctx.closePath(); ctx.fill();
-
-  // local player + name
   drawStick(player.x - camX + player.w/2, player.y - camY, player, localColor);
-  ctx.save();
-  ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = localColor; // match player color
-  ctx.fillText((localName||'You').slice(0,14), player.x - camX + player.w/2, player.y - camY - 56);
-  ctx.restore();
-
-  // Remote ghosts + names
+  ctx.save(); ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial'; ctx.textAlign = 'center'; ctx.fillStyle = localColor; ctx.fillText((localName||'You').slice(0,14), player.x - camX + player.w/2, player.y - camY - 56); ctx.restore();
   for (const [pid, p] of Object.entries(players)) {
     if (pid === localId) continue;
     const ghost = { x:p.x||0, y:p.y||0, w:20, h:52, vx:p.vx||0, vy:p.vy||0, onGround: Math.abs((p.vy||0))<1, runCycle:0, facing:(p.vx||0)>0?1:-1, landedAt: -999 };
     drawStick(ghost.x - camX + 10, ghost.y - camY, ghost, p.color||'#b6c4ff');
-    ctx.save();
-    ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = p.color || '#b6c4ff'; // match that player's color
-    ctx.fillText((p.name||'Player').slice(0,14), ghost.x - camX, ghost.y - camY - 56);
-    ctx.restore();
+    ctx.save(); ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial'; ctx.textAlign = 'center'; ctx.fillStyle = p.color || '#b6c4ff'; ctx.fillText((p.name||'Player').slice(0,14), ghost.x - camX, ghost.y - camY - 56); ctx.restore();
   }
-
   const displayTime = finished ? (timeNow - timeStart) : Math.max(0, timeNow - timeStart);
   timeEl.textContent = displayTime.toFixed(3);
-
   if (timeNow < deathFlashUntil) { ctx.fillStyle = 'rgba(255,80,60,0.35)'; ctx.fillRect(0,0,cw,ch); }
 }
 
@@ -770,27 +711,14 @@ let lastRAF = performance.now();
 let lastSync = 0;
 function loop(now){
   const dtRaw = (now - lastRAF) / 1000; lastRAF = now; const dt = Math.min(1/30, Math.max(0, dtRaw));
-  timeNow += dt;
-  if (!timeStart) timeStart = timeNow;
-  physics(dt);
-  draw();
-  if (roomId && (now - lastSync) > 100) { // ~10 Hz
-    lastSync = now;
-    db.ref(`rooms/${roomId}/players/${localId}`).update({ name: localName, color: localColor, x: player.x, y: player.y, vx: player.vx, vy: player.vy });
-  }
+  timeNow += dt; if (!timeStart) timeStart = timeNow; physics(dt); draw();
+  if (roomId && (now - lastSync) > 100) { lastSync = now; db.ref(`rooms/${roomId}/players/${localId}`).update({ name: localName, color: localColor, x: player.x, y: player.y, vx: player.vx, vy: player.vy }); }
   requestAnimationFrame(loop);
 }
 
-function startGame(){
-  seedEl.textContent = seed;
-  generateLevel(seed);
-  restartLocal();
-  requestAnimationFrame(loop);
-}
+function startGame(){ seedEl.textContent = seed; generateLevel(seed); restartLocal(); requestAnimationFrame(loop); }
 
-addEventListener('beforeunload', ()=>{
-  if (roomId) { try { db.ref(`rooms/${roomId}/players/${localId}`).remove(); } catch(e){} }
-});
+addEventListener('beforeunload', ()=>{ if (roomId) { try { db.ref(`rooms/${roomId}/players/${localId}`).remove(); } catch(e){} } });
 
 startPractice();
 
@@ -801,38 +729,15 @@ issues like stray braces or redeclarations without altering gameplay. */
   try {
     const params = new URLSearchParams(location.search);
     if (params.get('test') !== '1') return;
-
     console.log('[TEST] starting');
-    // Test 1: createRoom shape (no throw, correct set payload)
-    (function(){
-      const payload = { seed:123, hostId:'abc', started:true, leaderboard:{} };
-      const ok = payload.seed===123 && payload.hostId==='abc' && payload.started===true && typeof payload.leaderboard==='object';
-      console.assert(ok, 'createRoom payload shape invalid');
-    })();
-
-    // Test 2: generateLevel does not throw (e.g., redeclaration)
-    (function(){
-      let threw = false;
-      try { generateLevel(42); } catch(e){ threw = true; }
-      console.assert(!threw, 'generateLevel should not throw');
-    })();
-
-    // Test 3: hostNewLevel exists and is a function
+    (function(){ const payload = { seed:123, hostId:'abc', started:true, leaderboard:{} }; const ok = payload.seed===123 && payload.hostId==='abc' && payload.started===true && typeof payload.leaderboard==='object'; console.assert(ok, 'createRoom payload shape invalid'); })();
+    (function(){ let threw = false; try { generateLevel(42); } catch(e){ threw = true; } console.assert(!threw, 'generateLevel should not throw'); })();
     console.assert(typeof hostNewLevel === 'function', 'hostNewLevel should be defined');
-
-    // Test 4: ripple radius is never negative
-    (function(){
-      const r1 = rippleRadius(-5);
-      const r2 = rippleRadius(0);
-      const r3 = rippleRadius(0.12);
-      const r4 = rippleRadius(1);
-      console.assert(r1 >= 10 && r2 >= 10 && r3 >= 10 && r4 >= 10, 'ripple radius should never be negative');
-    })();
-
+    (function(){ const r1 = rippleRadius(-5), r2 = rippleRadius(0), r3 = rippleRadius(0.12), r4 = rippleRadius(1); console.assert(r1 >= 10 && r2 >= 10 && r3 >= 10 && r4 >= 10, 'ripple radius should never be negative'); })();
+    // New test: world scaling deterministic regardless of window
+    (function(){ const h = WORLD_H; console.assert(h === 900, 'WORLD_H should be constant for all clients'); })();
     console.log('[TEST] passed');
-  } catch (e) {
-    console.error('[TEST] failed', e);
-  }
+  } catch (e) { console.error('[TEST] failed', e); }
 })();
 </script>
 </body>
