@@ -442,20 +442,15 @@ function generatePracticeLevel(seed){
   const groundY = Math.round(WORLD_H*0.62);
   const startPlat = {x: 0, y: groundY, w: 260, h: 18};
   segs.push(startPlat);
-    const minY = 80;
+  const minY = 80;
   const maxY = Math.min(WORLD_H - 140, groundY + 80);
   const floorY = Math.min(maxY+100, WORLD_H-20);
-
-  const maxJump = Math.floor((WORLD.jumpVel * WORLD.jumpVel) / (2 * WORLD.gravity));
-  const GLOBAL_ANTI_CHEESE = 80; // same buffer for practice
-  const reachCapY = Math.min(maxY, floorY - (maxJump + GLOBAL_ANTI_CHEESE));
-
   let cursorX = startPlat.x + startPlat.w;
   let cursorY = startPlat.y;
   const targetLen = 1400;
   while (cursorX < targetLen){
     const dY = (R() < 0.55 ? (R()*140) : -(R()*90));
-        let newY = Math.max(minY, Math.min(reachCapY, cursorY + dY));
+    let newY = Math.max(minY, Math.min(maxY, cursorY + dY));
     if (newY > floorY - 160) newY = floorY - 160;
     const maxDx = maxHorizDistanceForDeltaY(newY - cursorY) * 0.85;
     const minDx = Math.max(90, maxDx*0.35);
@@ -608,13 +603,9 @@ function generateLevel(wSeed){
   segs.push(startPlat);
 
   const targetLen = 4200;
-    const minY = 80;
+  const minY = 80;
   const maxY = Math.min(WORLD_H - 140, groundY + 100);
   const floorY = Math.min(maxY+100, WORLD_H-20);
-
-  const maxJump = Math.floor((WORLD.jumpVel * WORLD.jumpVel) / (2 * WORLD.gravity));
-  const GLOBAL_ANTI_CHEESE = 80; // tweak: bigger = stricter cap
-  const reachCapY = Math.min(maxY, floorY - (maxJump + GLOBAL_ANTI_CHEESE));
 
   let cursorX = startPlat.x + startPlat.w;
   let cursorY = startPlat.y;
@@ -622,7 +613,7 @@ function generateLevel(wSeed){
   while (cursorX < targetLen) {
     const maxUp = 120, maxDown = 190;
     let dY = (R() < 0.55 ? (R()*maxDown) : -(R()*maxUp));
-       let newY = Math.max(minY, Math.min(reachCapY, cursorY + dY));
+    let newY = Math.max(minY, Math.min(maxY, cursorY + dY));
     if (newY > floorY - 160) newY = floorY - 160;
     dY = newY - cursorY;
 
